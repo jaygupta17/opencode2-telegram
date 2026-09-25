@@ -102,8 +102,17 @@ test_b() {
     sleep 1
   done
   [ "$proof_ok" = 1 ] || echo "NOTE: setup not yet proven when killed"
-  curl -s -m 5 -u opencode:tg-harness "http://127.0.0.1:$PORT/api/plugin" \
-    >"$T/pluginlist.json" 2>/dev/null || true
+  local registry_ok=0
+  for _ in $(seq 1 15); do
+    curl -s -m 5 -u opencode:tg-harness "http://127.0.0.1:$PORT/api/plugin" \
+      >"$T/pluginlist.json" 2>/dev/null || true
+    if grep -q '"id":"opencode-telegram"' "$T/pluginlist.json" 2>/dev/null; then
+      registry_ok=1
+      break
+    fi
+    sleep 1
+  done
+  [ "$registry_ok" = 1 ] || echo "NOTE: registry never listed the plugin"
   kill "$pid" 2>/dev/null
   wait "$pid" 2>/dev/null
   sleep 1

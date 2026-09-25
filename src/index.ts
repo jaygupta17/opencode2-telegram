@@ -38,6 +38,10 @@ export default Plugin.define({
     }
     const delivery: "steer" | "queue" = ctx.options.delivery === "steer" ? "steer" : "queue"
     const throttleMs = typeof ctx.options.throttleMs === "number" ? ctx.options.throttleMs : 1500
+    const activityOn = ctx.options.activity !== "off"
+    const showReasoning = ctx.options.showReasoning !== false
+    const maxActivity =
+      typeof ctx.options.maxActivityMessages === "number" ? ctx.options.maxActivityMessages : 60
 
     // default model for NEW sessions (else opencode's default — may be plan-gated)
     const modelOpt = typeof ctx.options.model === "string" ? ctx.options.model : ""
@@ -63,8 +67,16 @@ export default Plugin.define({
         tlog("loop owned by another opencode process (pid lease busy) — standing down")
         lease = undefined
       } else {
-        renderer = new Renderer(bot as TelegramBot, sessions, throttleMs)
-        tlog(`telegram holder active (offset=${lease.offset}, delivery=${delivery}, allowFrom=${JSON.stringify(allowFrom)})`)
+        renderer = new Renderer(bot as TelegramBot, sessions, {
+          throttleMs,
+          activity: activityOn,
+          showReasoning,
+          maxActivityMessages: maxActivity,
+        })
+        tlog(
+          `telegram holder active (offset=${lease.offset}, delivery=${delivery}, ` +
+            `activity=${activityOn ? "per-action" : "off"}, reasoning=${showReasoning}, allowFrom=${JSON.stringify(allowFrom)})`,
+        )
 
         const onMessage = async (msg: TelegramMessage): Promise<void> => {
           try {
