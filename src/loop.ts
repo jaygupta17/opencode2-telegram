@@ -1,7 +1,7 @@
 import { closeSync, mkdirSync, openSync, readFileSync, unlinkSync, writeSync, existsSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
-import { TelegramBot, type TelegramConfig, type TelegramUpdate } from "./bot.js"
+import { TelegramBot, type TelegramConfig, type TelegramMessage, type TelegramUpdate } from "./bot.js"
 import { tlog } from "./log.js"
 
 /**
@@ -115,8 +115,13 @@ export function acquireLease(): Lease {
   }
 }
 
-/** Route one update: DM-only gate → allowlist/bootstrap → echo commands. */
-async function route(bot: TelegramBot, cfg: TelegramConfig, update: TelegramUpdate): Promise<void> {
+/** DM-only gate → allowlist/bootstrap → hand off to the message handler. */
+async function route(
+  bot: TelegramBot,
+  cfg: TelegramConfig,
+  update: TelegramUpdate,
+  onMessage: (msg: TelegramMessage) => Promise<void>,
+): Promise<void> {
   const msg = update.message
   if (!msg) return
   if (msg.chat.type !== "private") {
@@ -135,26 +140,21 @@ async function route(bot: TelegramBot, cfg: TelegramConfig, update: TelegramUpda
     await bot.sendMessage(msg.chat.id, `chat_id: ${chatId}\n\nAdd it to options.allowFrom in opencode.json to lock the bot to your account.`)
     return
   }
-  const text = msg.text ?? ""
-  if (text.startsWith("/")) {
-    const cmd = text.slice(1).split(/[\s@]+/)[0]?.toLowerCase()
-    if (cmd === "start" || cmd === "help") {
-      await bot.sendMessage(msg.chat.id, "opencode-telegram is alive. Commands land in Phase 3 — echo is running for now.")
-    } else {
-      await bot.sendMessage(msg.chat.id, `unknown command: /${cmd}`)
-    }
+  if (!msg.text) {
+    await bot.sendMessage(msg.chat.id, "text only for now (attachments: later phase)").catch(() => {})
     return
   }
-  await bot.sendMessage(msg.chat.id, `↩ ${text}`)
+  await onMessage(msg)
 }
 
 export async function runPollLoop(opts: {
+  bot: TelegramBot
   cfg: TelegramConfig
   lease: Lease
   signal: AbortSignal
+  onMessage: (msg: TelegramMessage) => Promise<void>
 }): Promise<void> {
-  const { cfg, lease, signal } = opts
-  const bot = new TelegramBot(cfg)
+  const { bot, cfg, lease, signal, onMessage } = opts
   let backoffMs = 2_000
   let offset = lease.offset
 
@@ -166,7 +166,7 @@ export async function runPollLoop(opts: {
         offset = update.update_id + 1
         lease.setOffset(offset)
         try {
-          await route(bot, cfg, update)
+          await route(bot, cfg, update, onMessage)
         } catch (err) {
           tlog(`route error: ${String(err)}`)
         }

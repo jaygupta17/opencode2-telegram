@@ -1,13 +1,15 @@
 /** Minimal zero-dependency Telegram Bot API client (fetch-based). */
 
+export interface TelegramMessage {
+  message_id: number
+  text?: string
+  chat: { id: number; type: string }
+  from?: { id: number; username?: string; first_name?: string }
+}
+
 export interface TelegramUpdate {
   update_id: number
-  message?: {
-    message_id: number
-    text?: string
-    chat: { id: number; type: string }
-    from?: { id: number; username?: string; first_name?: string }
-  }
+  message?: TelegramMessage
 }
 
 export interface TelegramConfig {
@@ -52,5 +54,10 @@ export class TelegramBot {
     // Telegram rejects >4096 chars; chunk defensively.
     const chunk = text.length > 4096 ? `${text.slice(0, 4093)}...` : text
     return this.call("sendMessage", { chat_id: chatId, text: chunk }, signal)
+  }
+
+  editMessageText(chatId: number, messageID: number, text: string, signal?: AbortSignal): Promise<unknown> {
+    const chunk = text.length > 4096 ? `${text.slice(0, 4093)}...` : text
+    return this.call("editMessageText", { chat_id: chatId, message_id: messageID, text: chunk }, signal)
   }
 }
