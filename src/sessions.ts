@@ -19,6 +19,7 @@ export class Sessions {
   constructor(
     private readonly ctx: Context,
     private readonly delivery: Delivery,
+    private readonly defaultModel?: { providerID: string; id: string },
   ) {}
 
   async chatFor(sessionID: string): Promise<string | undefined> {
@@ -47,7 +48,10 @@ export class Sessions {
   }
 
   async create(chatId: number): Promise<string> {
-    const info = await this.ctx.session.create({ title: "telegram" })
+    const info = await this.ctx.session.create({
+      title: "telegram",
+      ...(this.defaultModel ? { model: this.defaultModel } : {}),
+    })
     const sid = info.id
     await this.ctx.storage.set(`map:chat:${chatId}`, sid)
     await this.ctx.storage.set(`map:session:${sid}`, String(chatId))

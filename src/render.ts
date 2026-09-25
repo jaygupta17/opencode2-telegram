@@ -101,8 +101,14 @@ export class Renderer {
         return
       }
       case "session.execution.failed": {
-        const err = (data.error ?? {}) as { name?: string; data?: { message?: string } }
-        const msg = err.data?.message ?? err.name ?? "unknown error"
+        const err = (data.error ?? {}) as {
+          message?: string
+          type?: string
+          name?: string
+          data?: { message?: string }
+        }
+        // SessionStructuredError arrives as {type, message}; older shapes as {name, data:{message}}
+        const msg = err.message ?? err.data?.message ?? err.name ?? err.type ?? "unknown error"
         const body = this.render(state)
         await this.finalize(state, body ? `${body}\n\n❌ ${msg}` : `❌ ${msg}`)
         tlog(`execution failed: ${msg}`)

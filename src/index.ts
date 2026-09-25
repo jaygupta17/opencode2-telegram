@@ -39,8 +39,17 @@ export default Plugin.define({
     const delivery: "steer" | "queue" = ctx.options.delivery === "steer" ? "steer" : "queue"
     const throttleMs = typeof ctx.options.throttleMs === "number" ? ctx.options.throttleMs : 1500
 
+    // default model for NEW sessions (else opencode's default — may be plan-gated)
+    const modelOpt = typeof ctx.options.model === "string" ? ctx.options.model : ""
+    let defaultModel: { providerID: string; id: string } | undefined
+    const slash = modelOpt.indexOf("/")
+    if (slash > 0) {
+      defaultModel = { providerID: modelOpt.slice(0, slash), id: modelOpt.slice(slash + 1) }
+      tlog(`default model for new sessions: ${modelOpt}`)
+    }
+
     const ac = new AbortController()
-    const sessions = new Sessions(ctx, delivery)
+    const sessions = new Sessions(ctx, delivery, defaultModel)
     const bot = token ? new TelegramBot(cfg) : undefined
 
     let lease: Lease | undefined
