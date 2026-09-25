@@ -115,13 +115,27 @@ export function acquireLease(): Lease {
   }
 }
 
-/** DM-only gate → allowlist/bootstrap → hand off to the message handler. */
+/** DM-only gate → allowlist/bootstrap → hand off to handlers. */
 async function route(
   bot: TelegramBot,
   cfg: TelegramConfig,
   update: TelegramUpdate,
-  onMessage: (msg: TelegramMessage) => Promise<void>,
+  handlers: {
+    onMessage: (msg: TelegramMessage) => Promise<void>
+    onCallback: (cb: { callbackID: string; chatId: number; data: string }) => Promise<void>
+  },
 ): Promise<void> {
+  const cb = update.callback_query
+  if (cb) {
+    const chatId = String(cb.message?.chat?.id ?? cb.from.id)
+    if (!cfg.allowFrom.includes(chatId)) {
+      tlog(`ignored callback from ${chatId}`)
+      await bot.answerCallbackQuery(cb.id).catch(() => {})
+      return
+    }
+    await handlers.onCallback({ callbackID: cb.id, chatId: Number(chatId), data: cb.data ?? "" })
+    return
+  }
   const msg = update.message
   if (!msg) return
   if (msg.chat.type !== "private") {
@@ -144,7 +158,7 @@ async function route(
     await bot.sendMessage(msg.chat.id, "text only for now (attachments: later phase)").catch(() => {})
     return
   }
-  await onMessage(msg)
+  await handlers.onMessage(msg)
 }
 
 export async function runPollLoop(opts: {
@@ -153,8 +167,9 @@ export async function runPollLoop(opts: {
   lease: Lease
   signal: AbortSignal
   onMessage: (msg: TelegramMessage) => Promise<void>
+  onCallback: (cb: { callbackID: string; chatId: number; data: string }) => Promise<void>
 }): Promise<void> {
-  const { bot, cfg, lease, signal, onMessage } = opts
+  const { bot, cfg, lease, signal, onMessage, onCallback } = opts
   let backoffMs = 2_000
   let offset = lease.offset
 
@@ -166,7 +181,7 @@ export async function runPollLoop(opts: {
         offset = update.update_id + 1
         lease.setOffset(offset)
         try {
-          await route(bot, cfg, update, onMessage)
+          await route(bot, cfg, update, { onMessage, onCallback })
         } catch (err) {
           tlog(`route error: ${String(err)}`)
         }

@@ -42,6 +42,9 @@ export default Plugin.define({
     const showReasoning = ctx.options.showReasoning !== false
     const maxActivity =
       typeof ctx.options.maxActivityMessages === "number" ? ctx.options.maxActivityMessages : 60
+    const formatting: "html" | "plain" = ctx.options.formatting === "plain" ? "plain" : "html"
+    const typingOn = ctx.options.typing !== false
+    const stopButtonOn = ctx.options.stopButton !== false
 
     // default model for NEW sessions (else opencode's default — may be plan-gated)
     const modelOpt = typeof ctx.options.model === "string" ? ctx.options.model : ""
@@ -72,10 +75,14 @@ export default Plugin.define({
           activity: activityOn,
           showReasoning,
           maxActivityMessages: maxActivity,
+          formatting,
+          typing: typingOn,
+          stopButton: stopButtonOn,
         })
         tlog(
           `telegram holder active (offset=${lease.offset}, delivery=${delivery}, ` +
-            `activity=${activityOn ? "per-action" : "off"}, reasoning=${showReasoning}, allowFrom=${JSON.stringify(allowFrom)})`,
+            `activity=${activityOn ? "per-action" : "off"}, reasoning=${showReasoning}, ` +
+            `formatting=${formatting}, allowFrom=${JSON.stringify(allowFrom)})`,
         )
 
         const onMessage = async (msg: TelegramMessage): Promise<void> => {
@@ -93,9 +100,38 @@ export default Plugin.define({
           }
         }
 
-        void runPollLoop({ bot: bot as TelegramBot, cfg, lease, signal: ac.signal, onMessage }).catch((err) =>
-          tlog(`poll loop crashed: ${String(err)}`),
-        )
+        const onCallback = async (cb: {
+          callbackID: string
+          chatId: number
+          data: string
+        }): Promise<void> => {
+          try {
+            if (cb.data === "stop") {
+              const sid = await sessions.current(cb.chatId)
+              if (!sid) {
+                await bot?.answerCallbackQuery(cb.callbackID, "no active session")
+                return
+              }
+              await bot?.answerCallbackQuery(cb.callbackID, "⏹ stopping…")
+              await ctx.session.interrupt({ sessionID: sid })
+              tlog(`stop via button (session ${sid})`)
+            } else {
+              await bot?.answerCallbackQuery(cb.callbackID)
+            }
+          } catch (err) {
+            tlog(`callback error: ${String(err)}`)
+            await bot?.answerCallbackQuery(cb.callbackID).catch(() => {})
+          }
+        }
+
+        void runPollLoop({
+          bot: bot as TelegramBot,
+          cfg,
+          lease,
+          signal: ac.signal,
+          onMessage,
+          onCallback,
+        }).catch((err) => tlog(`poll loop crashed: ${String(err)}`))
       }
     }
 

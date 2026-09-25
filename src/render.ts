@@ -2,23 +2,30 @@ import type { V2Event } from "@opencode/client"
 import type { TelegramBot } from "./bot.js"
 import type { Sessions } from "./sessions.js"
 import { tlog } from "./log.js"
+import { esc, mdToHtml, splitHtml } from "./format.js"
 
 export interface RendererOptions {
   /** max ms between streamed edits of one message */
   throttleMs: number
   /** per-action activity messages on/off */
   activity: boolean
-  /** stream reasoning (thought tokens) as its own message */
+  /** stream reasoning (thought tokens) as its own message, always visible */
   showReasoning: boolean
   /** hard cap on activity+reasoning messages per turn (burst guard) */
   maxActivityMessages: number
+  /** answer rendering: telegram HTML (markdown) or raw */
+  formatting: "html" | "plain"
+  /** sendChatAction("typing") while the turn runs */
+  typing: boolean
+  /** [⏹ Stop] inline button on the placeholder */
+  stopButton: boolean
 }
 
 interface ToolCall {
   name: string
   msgID?: number
   t0?: number
-  /** final line arrived while the send was still queued */
+  /** terminal line arrived while the send was still queued */
   final?: string
 }
 
@@ -31,11 +38,16 @@ interface ReasoningState {
 
 interface TurnState {
   chatId: string
+  /** primary answer message (the placeholder — it morphs into the answer) */
   messageID?: number
+  /** all answer chunks when the answer exceeds 4096 (0 === messageID) */
+  chunkIDs: number[]
+  partsLen: number
   /** keyed assistantMessageID:ordinal — insertion order = stream order */
   buffer: Map<string, string>
   lastEdit: number
   flushTimer?: ReturnType<typeof setTimeout>
+  typingTimer?: ReturnType<typeof setInterval>
   tools: Map<string, ToolCall>
   reasoning: Map<string, ReasoningState>
   activityCount: number
@@ -53,7 +65,6 @@ const errText = (err: unknown): string => {
 
 const fmtDur = (ms: number): string => `${(ms / 1000).toFixed(1)}s`
 
-/** Composite state key: a new assistant message OR a new ordinal = a new block. */
 const blockKey = (data: Record<string, unknown>): string =>
   `${String(data.assistantMessageID ?? "?")}:${String(data.ordinal ?? 0)}`
 
@@ -61,21 +72,17 @@ const callKey = (data: Record<string, unknown>): string =>
   `${String(data.assistantMessageID ?? "?")}:${String(data.id ?? "?")}`
 
 /**
- * Renders assistant output for telegram chats (Phase 3b):
+ * Renders assistant output for telegram chats.
  *
- *   execution.started        -> placeholder "…" answer message
- *   reasoning.*              -> ONE message per reasoning BLOCK (keyed
- *                               assistantMessageID:ordinal), streamed via
- *                               throttled edits until that block's ended
- *   tool.input.started       -> remember call id -> tool name
- *   tool.input.ended/called  -> ONE new message per action: "🔧 name: input"
- *   tool.success/failed      -> edit that message: "✓/✗ name · dur · snippet"
- *   text.*                   -> answer message, throttled edit-in-place
- *   execution.succeeded/failed/interrupted -> finalization
+ * Message layout per turn:
+ *   [🧠 one streamed message per reasoning block]
+ *   [🔧 one message per tool action → edited to ✓/✗ with duration]
+ *   [placeholder "…" with [⏹ Stop] — morphs into the streamed answer,
+ *    split across chunks at block boundaries if >4096]
  *
- * Sends are rate-limited per chat through a queue (250ms gap, 429 retry).
- * Terminal edits that arrive while a send is still queued are held in
- * `final` and applied as soon as the message id resolves.
+ * Answer = LLM markdown -> md-to-telegram -> parse_mode HTML (plain
+ * fallback on 400). Activity messages are silent; the placeholder notifies.
+ * Typing indicator runs while the execution is live.
  * Runs ONLY in the lease-holder process.
  */
 export class Renderer {
@@ -129,17 +136,33 @@ export class Renderer {
     if (ev.type === "session.execution.started") {
       const chatId = await this.sessions.chatFor(sessionID)
       if (!chatId) return
-      this.turns.set(sessionID, {
+      const state: TurnState = {
         chatId,
+        chunkIDs: [],
+        partsLen: 0,
         buffer: new Map(),
         lastEdit: 0,
         tools: new Map(),
         reasoning: new Map(),
         activityCount: 0,
-      })
-      const state = this.turns.get(sessionID)
-      if (!state) return
-      await this.enqueue(Number(chatId), () => this.bot.sendMessage(Number(chatId), "…"))
+      }
+      this.turns.set(sessionID, state)
+      if (this.opts.typing) {
+        void this.bot.sendChatAction(Number(chatId), "typing").catch(() => {})
+        state.typingTimer = setInterval(() => {
+          void this.bot.sendChatAction(Number(chatId), "typing").catch(() => {})
+        }, 5000)
+      }
+      // placeholder IS the answer message: captured id, Stop button attached
+      await this.enqueue(Number(chatId), () =>
+        this.bot.sendMessage(Number(chatId), "…", { stopButton: this.opts.stopButton }).then((m) => {
+          const id = (m as { message_id?: number })?.message_id
+          if (id !== undefined) {
+            state.messageID = id
+            state.chunkIDs = [id]
+          }
+        }),
+      )
       return
     }
 
@@ -152,32 +175,35 @@ export class Renderer {
     return state.activityCount < this.opts.maxActivityMessages
   }
 
+  private htmlOn(): boolean {
+    return this.opts.formatting === "html"
+  }
+
   private async reduce(state: TurnState, ev: V2Event): Promise<void> {
     const data = ev.data as Record<string, unknown> & { sessionID: string }
 
     switch (ev.type) {
-      // ---------- answer ----------
+      // ---------- answer (raw markdown kept in buffer, converted at flush) ----------
       case "session.text.started":
         state.buffer.set(blockKey(data), "")
         return
       case "session.text.delta": {
         const key = blockKey(data)
         state.buffer.set(key, (state.buffer.get(key) ?? "") + String(data.delta))
-        await this.maybeFlush(state, false)
+        await this.maybeFlush(state)
         return
       }
       case "session.text.ended":
         state.buffer.set(blockKey(data), String(data.text ?? ""))
-        await this.maybeFlush(state, false)
+        await this.maybeFlush(state)
         return
 
-      // ---------- reasoning: one message per block ----------
+      // ---------- reasoning: one always-visible message per block ----------
       case "session.reasoning.started": {
         if (!this.opts.showReasoning || !this.hasRoom(state)) return
         const key = blockKey(data)
         const existing = state.reasoning.get(key)
         if (existing) {
-          // same block restarted (retry): reset its stream, keep its message
           existing.buf = "🧠"
           existing.lastEdit = 0
           existing.final = undefined
@@ -186,11 +212,11 @@ export class Renderer {
         state.activityCount++
         const r: ReasoningState = { buf: "🧠", lastEdit: 0 }
         state.reasoning.set(key, r)
-        r.msgID = await this.sendActivity(state, "🧠")
+        r.msgID = await this.sendPlain(state, "🧠", true)
         if (r.final !== undefined && r.msgID !== undefined) {
           const final = r.final
           r.final = undefined
-          await this.editActivity(state, r.msgID, final)
+          await this.editPlain(state, r.msgID, final)
         }
         return
       }
@@ -200,23 +226,20 @@ export class Renderer {
         r.buf += String(data.delta)
         if (r.msgID !== undefined && Date.now() - r.lastEdit >= this.opts.throttleMs) {
           r.lastEdit = Date.now()
-          await this.editActivity(state, r.msgID, `🧠 ${singleLine(r.buf, 4000)}`)
+          await this.editPlain(state, r.msgID, singleLine(r.buf, 4000))
         }
         return
       }
       case "session.reasoning.ended": {
         const r = state.reasoning.get(blockKey(data))
         if (!r) return
-        const final = `🧠 ${singleLine(String(data.text ?? r.buf), 4000)}`
-        if (r.msgID !== undefined) {
-          await this.editActivity(state, r.msgID, final)
-        } else {
-          r.final = final // send still queued — apply when the id resolves
-        }
+        const final = singleLine(String(data.text ?? r.buf), 4000)
+        if (r.msgID !== undefined) await this.editPlain(state, r.msgID, final)
+        else r.final = final
         return
       }
 
-      // ---------- tools: one message per action ----------
+      // ---------- tools: one message per action, styled with <code> ----------
       case "session.tool.input.started": {
         if (!this.opts.activity) return
         const key = callKey(data)
@@ -237,20 +260,19 @@ export class Renderer {
           call = { name: "tool" }
           state.tools.set(key, call)
         }
-        if (call.msgID !== undefined || call.final !== undefined) return // already sent
+        if (call.msgID !== undefined || call.final !== undefined) return
         if (!this.hasRoom(state)) return
         state.activityCount++
         const inputText =
           ev.type === "session.tool.input.ended"
             ? String(data.text ?? "")
             : singleLine(JSON.stringify(data.input ?? {}) ?? "", 200)
-        const label = inputText ? `${call.name}: ${singleLine(inputText, 250)}` : call.name
         call.t0 = (ev as { created?: number }).created ?? Date.now()
-        call.msgID = await this.sendActivity(state, `🔧 ${label}`)
+        call.msgID = await this.sendTool(state, this.toolStartLine(call.name, inputText))
         if (call.final !== undefined && call.msgID !== undefined) {
           const final = call.final
           call.final = undefined
-          await this.editActivity(state, call.msgID, final)
+          await this.editTool(state, call.msgID, final)
         }
         return
       }
@@ -259,40 +281,70 @@ export class Renderer {
         if (!call) return
         const snippet = this.contentSnippet(data.content)
         const dur = call.t0 ? fmtDur(((ev as { created?: number }).created ?? Date.now()) - call.t0) : ""
-        const line = `✓ ${call.name}${dur ? ` · ${dur}` : ""}${snippet ? ` · ${snippet}` : ""}`
-        if (call.msgID !== undefined) await this.editActivity(state, call.msgID, line)
-        else call.final = line // send queued — apply on resolution
+        const line = this.toolEndLine(true, call.name, dur, snippet)
+        if (call.msgID !== undefined) await this.editTool(state, call.msgID, line)
+        else call.final = line
         return
       }
       case "session.tool.failed": {
         const call = state.tools.get(callKey(data))
         if (!call) return
         const dur = call.t0 ? fmtDur(((ev as { created?: number }).created ?? Date.now()) - call.t0) : ""
-        const line = `✗ ${call.name}${dur ? ` · ${dur}` : ""} · ${singleLine(errText(data.error), 250)}`
-        if (call.msgID !== undefined) await this.editActivity(state, call.msgID, line)
+        const line = this.toolEndLine(false, call.name, dur, errText(data.error))
+        if (call.msgID !== undefined) await this.editTool(state, call.msgID, line)
         else call.final = line
         return
       }
 
       // ---------- finalization ----------
-      case "session.execution.succeeded":
-        await this.finalize(state, this.render(state) || "✅")
+      case "session.execution.succeeded": {
+        this.stopTyping(state)
+        await this.flushAnswer(state, this.render(state) || "✅", true)
         return
+      }
       case "session.execution.interrupted": {
+        this.stopTyping(state)
         const body = this.render(state)
-        await this.finalize(state, body ? `${body}\n\n⏹ interrupted` : "⏹ interrupted")
+        await this.flushAnswer(state, body ? `${body}\n\n⏹ interrupted` : "⏹ interrupted", true)
         return
       }
       case "session.execution.failed": {
+        this.stopTyping(state)
         const msg = errText(data.error)
         const body = this.render(state)
-        await this.finalize(state, body ? `${body}\n\n❌ ${msg}` : `❌ ${msg}`)
+        await this.flushAnswer(state, body ? `${body}\n\n❌ ${msg}` : `❌ ${msg}`, true)
         tlog(`execution failed: ${msg}`)
         return
       }
       default:
         return
     }
+  }
+
+  private stopTyping(state: TurnState): void {
+    if (state.typingTimer) {
+      clearInterval(state.typingTimer)
+      state.typingTimer = undefined
+    }
+  }
+
+  // ---- tool line builders (hand-built HTML when formatting=html) ----
+  private toolStartLine(name: string, input: string): string {
+    const n = singleLine(name, 40)
+    const i = singleLine(input, 250)
+    if (!this.htmlOn()) return i ? `🔧 ${n}: ${i}` : `🔧 ${n}`
+    return i
+      ? `🔧 <code>${esc(n)}</code>: <code>${esc(i)}</code>`
+      : `🔧 <code>${esc(n)}</code>`
+  }
+
+  private toolEndLine(ok: boolean, name: string, dur: string, detail: string): string {
+    const mark = ok ? "✓" : "✗"
+    const n = singleLine(name, 40)
+    const d = singleLine(detail, 150)
+    const head = `${mark} <code>${esc(n)}</code>${dur ? ` · ${dur}` : ""}`
+    if (!this.htmlOn()) return `${mark} ${n}${dur ? ` · ${dur}` : ""}${d ? ` · ${d}` : ""}`
+    return d ? `${head} · ${esc(d)}` : head
   }
 
   private contentSnippet(content: unknown): string {
@@ -304,88 +356,152 @@ export class Renderer {
       })
       .filter(Boolean)
       .join(" ")
-    return texts ? singleLine(texts, 150) : ""
+    return texts
   }
 
-  // ---- activity messages (go through the per-chat send queue) ----
-  private async sendActivity(state: TurnState, text: string): Promise<number | undefined> {
+  // ---- activity message helpers ----
+  private async sendPlain(state: TurnState, text: string, silent: boolean): Promise<number | undefined> {
     let msgID: number | undefined
     await this.enqueue(Number(state.chatId), () =>
-      this.bot.sendMessage(Number(state.chatId), text).then((m) => {
+      this.bot.sendMessage(Number(state.chatId), text, { silent }).then((m) => {
         msgID = (m as { message_id?: number })?.message_id
       }),
     )
     return msgID
   }
 
-  private async editActivity(state: TurnState, messageID: number, text: string): Promise<void> {
+  private async editPlain(state: TurnState, messageID: number, text: string): Promise<void> {
     if (this.disposed) return
     try {
       await this.bot.editMessageText(Number(state.chatId), messageID, text)
     } catch (err) {
       const message = String(err)
-      if (!message.includes("message is not modified")) tlog(`activity edit error: ${message}`)
+      if (!message.includes("message is not modified")) tlog(`edit error: ${message}`)
     }
   }
 
-  // ---- answer message ----
+  private async sendTool(state: TurnState, html: string): Promise<number | undefined> {
+    let msgID: number | undefined
+    const opts = { html: this.htmlOn(), silent: true }
+    await this.enqueue(Number(state.chatId), () =>
+      this.bot.sendMessage(Number(state.chatId), html, opts).then((m) => {
+        msgID = (m as { message_id?: number })?.message_id
+      }),
+    )
+    return msgID
+  }
+
+  private async editTool(state: TurnState, messageID: number, html: string): Promise<void> {
+    if (this.disposed) return
+    try {
+      await this.bot.editMessageText(Number(state.chatId), messageID, html, {
+        html: this.htmlOn(),
+      })
+    } catch (err) {
+      const message = String(err)
+      if (!message.includes("message is not modified")) tlog(`tool edit error: ${message}`)
+    }
+  }
+
+  // ---- answer message (markdown -> HTML, chunked at block boundaries) ----
   private render(state: TurnState): string {
-    // insertion order = arrival order = stream order (no re-sort: keys are composite)
     return [...state.buffer.values()].filter((text) => text.length > 0).join("\n\n")
   }
 
-  private async maybeFlush(state: TurnState, force: boolean): Promise<void> {
+  private async maybeFlush(state: TurnState): Promise<void> {
     if (this.disposed) return
-    const text = this.render(state)
-    if (!text) return
+    const raw = this.render(state)
+    if (!raw) return
     const now = Date.now()
-    if (force || now - state.lastEdit >= this.opts.throttleMs) {
-      await this.flush(state, text)
+    if (now - state.lastEdit >= this.opts.throttleMs) {
+      await this.flushAnswer(state, raw, false)
       return
     }
     if (!state.flushTimer) {
       state.flushTimer = setTimeout(() => {
         state.flushTimer = undefined
-        void this.flush(state, this.render(state)).catch(() => {})
+        void this.flushAnswer(state, this.render(state), false).catch(() => {})
       }, this.opts.throttleMs - (now - state.lastEdit))
     }
   }
 
-  private async flush(state: TurnState, text: string): Promise<void> {
+  private async flushAnswer(state: TurnState, raw: string, final: boolean): Promise<void> {
     if (this.disposed) return
     state.lastEdit = Date.now()
-    try {
-      if (state.messageID === undefined) {
-        await this.enqueue(Number(state.chatId), () =>
-          this.bot.sendMessage(Number(state.chatId), text).then((m) => {
-            state.messageID = (m as { message_id?: number })?.message_id
-          }),
-        )
-      } else {
-        await this.bot.editMessageText(Number(state.chatId), state.messageID, text).catch(
-          (err: unknown) => {
-            const message = String(err)
-            if (!message.includes("message is not modified")) tlog(`flush error: ${message}`)
-          },
-        )
-      }
-    } catch (err) {
-      tlog(`flush error: ${String(err)}`)
-    }
-  }
-
-  private async finalize(state: TurnState, text: string): Promise<void> {
-    if (state.flushTimer) {
+    if (state.flushTimer && final) {
       clearTimeout(state.flushTimer)
       state.flushTimer = undefined
     }
-    await this.flush(state, text)
+
+    const parts: string[] = this.htmlOn()
+      ? splitHtml(mdToHtml(raw))
+      : [raw.length > 4000 ? `${raw.slice(0, 3999)}…` : raw]
+    const html = this.htmlOn()
+    const grown = parts.length > state.partsLen
+
+    try {
+      // ensure a message exists for every part
+      while (state.chunkIDs.length < parts.length) {
+        if (state.chunkIDs.length === 0 && state.messageID !== undefined) {
+          state.chunkIDs = [state.messageID]
+          continue
+        }
+        const idx = state.chunkIDs.length
+        const text = parts[idx] ?? ""
+        let newID: number | undefined
+        await this.enqueue(Number(state.chatId), () =>
+          this.bot.sendMessage(Number(state.chatId), text, { html, silent: true }).then((m) => {
+            newID = (m as { message_id?: number })?.message_id
+          }),
+        )
+        if (newID === undefined) break
+        state.chunkIDs.push(newID)
+      }
+
+      if (grown || parts.length === 1) {
+        // render/refresh every chunk we own (prefix-stable; not-modified suppressed)
+        for (let i = 0; i < state.chunkIDs.length && i < parts.length; i++) {
+          await this.editChunk(state, state.chunkIDs[i] as number, parts[i] as string, i === 0)
+        }
+      } else {
+        // only the last chunk is live
+        const last = state.chunkIDs.length - 1
+        const id = state.chunkIDs[last]
+        if (id !== undefined && parts[last] !== undefined) {
+          await this.editChunk(state, id, parts[last] as string, last === 0)
+        }
+      }
+      state.partsLen = parts.length
+    } catch (err) {
+      tlog(`answer flush error: ${String(err)}`)
+    }
+  }
+
+  private async editChunk(
+    state: TurnState,
+    messageID: number,
+    text: string,
+    isPrimary: boolean,
+  ): Promise<void> {
+    if (this.disposed) return
+    try {
+      await this.bot.editMessageText(Number(state.chatId), messageID, text, {
+        html: this.htmlOn(),
+        // primary edits clear the Stop keyboard (first answer text = buttons gone)
+        ...(isPrimary ? { removeKeyboard: true } : {}),
+      })
+    } catch (err) {
+      const message = String(err)
+      if (!message.includes("message is not modified")) tlog(`answer edit error: ${message}`)
+    }
   }
 
   dispose(): void {
     this.disposed = true
     for (const state of this.turns.values()) {
       if (state.flushTimer) clearTimeout(state.flushTimer)
+      if (state.typingTimer) clearInterval(state.typingTimer)
+      for (const r of state.reasoning.values()) if (r.final) void r.final
     }
     this.turns.clear()
   }

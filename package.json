@@ -15,7 +15,8 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@opencode/plugin": "2.0.16"
+    "@opencode/plugin": "2.0.16",
+    "md-to-telegram": "^0.1.1"
   },
   "devDependencies": {
     "@types/node": "^26.6.2",
