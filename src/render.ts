@@ -18,23 +18,26 @@ interface ToolCall {
   name: string
   msgID?: number
   t0?: number
+  /** final line arrived while the send was still queued */
+  final?: string
 }
 
 interface ReasoningState {
   msgID?: number
   buf: string
   lastEdit: number
-  timer?: ReturnType<typeof setTimeout>
+  final?: string
 }
 
 interface TurnState {
   chatId: string
   messageID?: number
-  buffer: Map<number, string>
+  /** keyed assistantMessageID:ordinal — insertion order = stream order */
+  buffer: Map<string, string>
   lastEdit: number
   flushTimer?: ReturnType<typeof setTimeout>
   tools: Map<string, ToolCall>
-  reasoning: Map<number, ReasoningState>
+  reasoning: Map<string, ReasoningState>
   activityCount: number
 }
 
@@ -50,11 +53,20 @@ const errText = (err: unknown): string => {
 
 const fmtDur = (ms: number): string => `${(ms / 1000).toFixed(1)}s`
 
+/** Composite state key: a new assistant message OR a new ordinal = a new block. */
+const blockKey = (data: Record<string, unknown>): string =>
+  `${String(data.assistantMessageID ?? "?")}:${String(data.ordinal ?? 0)}`
+
+const callKey = (data: Record<string, unknown>): string =>
+  `${String(data.assistantMessageID ?? "?")}:${String(data.id ?? "?")}`
+
 /**
  * Renders assistant output for telegram chats (Phase 3b):
  *
  *   execution.started        -> placeholder "…" answer message
- *   reasoning.*              -> ONE message per reasoning segment, streamed
+ *   reasoning.*              -> ONE message per reasoning BLOCK (keyed
+ *                               assistantMessageID:ordinal), streamed via
+ *                               throttled edits until that block's ended
  *   tool.input.started       -> remember call id -> tool name
  *   tool.input.ended/called  -> ONE new message per action: "🔧 name: input"
  *   tool.success/failed      -> edit that message: "✓/✗ name · dur · snippet"
@@ -62,6 +74,8 @@ const fmtDur = (ms: number): string => `${(ms / 1000).toFixed(1)}s`
  *   execution.succeeded/failed/interrupted -> finalization
  *
  * Sends are rate-limited per chat through a queue (250ms gap, 429 retry).
+ * Terminal edits that arrive while a send is still queued are held in
+ * `final` and applied as soon as the message id resolves.
  * Runs ONLY in the lease-holder process.
  */
 export class Renderer {
@@ -125,7 +139,7 @@ export class Renderer {
       })
       const state = this.turns.get(sessionID)
       if (!state) return
-      await this.enqueue(Number(chatId), () => this.bot.sendMessage(Number(chatId), "…")).then(() => {})
+      await this.enqueue(Number(chatId), () => this.bot.sendMessage(Number(chatId), "…"))
       return
     }
 
@@ -144,34 +158,44 @@ export class Renderer {
     switch (ev.type) {
       // ---------- answer ----------
       case "session.text.started":
-        state.buffer.set(Number(data.ordinal), "")
+        state.buffer.set(blockKey(data), "")
         return
       case "session.text.delta": {
-        const ord = Number(data.ordinal)
-        state.buffer.set(ord, (state.buffer.get(ord) ?? "") + String(data.delta))
+        const key = blockKey(data)
+        state.buffer.set(key, (state.buffer.get(key) ?? "") + String(data.delta))
         await this.maybeFlush(state, false)
         return
       }
       case "session.text.ended":
-        state.buffer.set(Number(data.ordinal), String(data.text ?? ""))
+        state.buffer.set(blockKey(data), String(data.text ?? ""))
         await this.maybeFlush(state, false)
         return
 
-      // ---------- reasoning: one message per segment ----------
+      // ---------- reasoning: one message per block ----------
       case "session.reasoning.started": {
         if (!this.opts.showReasoning || !this.hasRoom(state)) return
-        const ord = Number(data.ordinal)
-        if (state.reasoning.has(ord)) return
+        const key = blockKey(data)
+        const existing = state.reasoning.get(key)
+        if (existing) {
+          // same block restarted (retry): reset its stream, keep its message
+          existing.buf = "🧠"
+          existing.lastEdit = 0
+          existing.final = undefined
+          return
+        }
         state.activityCount++
         const r: ReasoningState = { buf: "🧠", lastEdit: 0 }
-        state.reasoning.set(ord, r)
-        await this.sendActivity(state, "🧠").then((msgID) => {
-          r.msgID = msgID
-        })
+        state.reasoning.set(key, r)
+        r.msgID = await this.sendActivity(state, "🧠")
+        if (r.final !== undefined && r.msgID !== undefined) {
+          const final = r.final
+          r.final = undefined
+          await this.editActivity(state, r.msgID, final)
+        }
         return
       }
       case "session.reasoning.delta": {
-        const r = state.reasoning.get(Number(data.ordinal))
+        const r = state.reasoning.get(blockKey(data))
         if (!r) return
         r.buf += String(data.delta)
         if (r.msgID !== undefined && Date.now() - r.lastEdit >= this.opts.throttleMs) {
@@ -181,62 +205,72 @@ export class Renderer {
         return
       }
       case "session.reasoning.ended": {
-        const r = state.reasoning.get(Number(data.ordinal))
-        if (!r || r.msgID === undefined) return
-        const final = String(data.text ?? r.buf)
-        await this.editActivity(state, r.msgID, `🧠 ${singleLine(final, 4000)}`)
+        const r = state.reasoning.get(blockKey(data))
+        if (!r) return
+        const final = `🧠 ${singleLine(String(data.text ?? r.buf), 4000)}`
+        if (r.msgID !== undefined) {
+          await this.editActivity(state, r.msgID, final)
+        } else {
+          r.final = final // send still queued — apply when the id resolves
+        }
         return
       }
 
       // ---------- tools: one message per action ----------
       case "session.tool.input.started": {
         if (!this.opts.activity) return
-        const call = state.tools.get(String(data.id))
+        const key = callKey(data)
+        const call = state.tools.get(key)
         if (call) {
           call.name = String(data.name ?? call.name)
           return
         }
-        state.tools.set(String(data.id), { name: String(data.name ?? "tool") })
+        state.tools.set(key, { name: String(data.name ?? "tool") })
         return
       }
       case "session.tool.input.ended":
       case "session.tool.called": {
         if (!this.opts.activity) return
-        const id = String(data.id)
-        let call = state.tools.get(id)
+        const key = callKey(data)
+        let call = state.tools.get(key)
         if (!call) {
           call = { name: "tool" }
-          state.tools.set(id, call)
+          state.tools.set(key, call)
         }
-        if (call.msgID !== undefined) return // already sent
+        if (call.msgID !== undefined || call.final !== undefined) return // already sent
         if (!this.hasRoom(state)) return
         state.activityCount++
         const inputText =
           ev.type === "session.tool.input.ended"
             ? String(data.text ?? "")
             : singleLine(JSON.stringify(data.input ?? {}) ?? "", 200)
-        const label = inputText
-          ? `${call.name}: ${singleLine(inputText, 250)}`
-          : call.name
+        const label = inputText ? `${call.name}: ${singleLine(inputText, 250)}` : call.name
         call.t0 = (ev as { created?: number }).created ?? Date.now()
         call.msgID = await this.sendActivity(state, `🔧 ${label}`)
+        if (call.final !== undefined && call.msgID !== undefined) {
+          const final = call.final
+          call.final = undefined
+          await this.editActivity(state, call.msgID, final)
+        }
         return
       }
       case "session.tool.success": {
-        const call = state.tools.get(String(data.id))
+        const call = state.tools.get(callKey(data))
         if (!call) return
         const snippet = this.contentSnippet(data.content)
         const dur = call.t0 ? fmtDur(((ev as { created?: number }).created ?? Date.now()) - call.t0) : ""
         const line = `✓ ${call.name}${dur ? ` · ${dur}` : ""}${snippet ? ` · ${snippet}` : ""}`
         if (call.msgID !== undefined) await this.editActivity(state, call.msgID, line)
+        else call.final = line // send queued — apply on resolution
         return
       }
       case "session.tool.failed": {
-        const call = state.tools.get(String(data.id))
+        const call = state.tools.get(callKey(data))
         if (!call) return
         const dur = call.t0 ? fmtDur(((ev as { created?: number }).created ?? Date.now()) - call.t0) : ""
         const line = `✗ ${call.name}${dur ? ` · ${dur}` : ""} · ${singleLine(errText(data.error), 250)}`
         if (call.msgID !== undefined) await this.editActivity(state, call.msgID, line)
+        else call.final = line
         return
       }
 
@@ -296,11 +330,8 @@ export class Renderer {
 
   // ---- answer message ----
   private render(state: TurnState): string {
-    return [...state.buffer.entries()]
-      .sort((a, b) => a[0] - b[0])
-      .map(([, text]) => text)
-      .filter((text) => text.length > 0)
-      .join("\n\n")
+    // insertion order = arrival order = stream order (no re-sort: keys are composite)
+    return [...state.buffer.values()].filter((text) => text.length > 0).join("\n\n")
   }
 
   private async maybeFlush(state: TurnState, force: boolean): Promise<void> {
@@ -348,9 +379,6 @@ export class Renderer {
       clearTimeout(state.flushTimer)
       state.flushTimer = undefined
     }
-    for (const r of state.reasoning.values()) {
-      if (r.timer) clearTimeout(r.timer)
-    }
     await this.flush(state, text)
   }
 
@@ -358,7 +386,6 @@ export class Renderer {
     this.disposed = true
     for (const state of this.turns.values()) {
       if (state.flushTimer) clearTimeout(state.flushTimer)
-      for (const r of state.reasoning.values()) if (r.timer) clearTimeout(r.timer)
     }
     this.turns.clear()
   }
