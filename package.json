@@ -1,0 +1,24 @@
+{
+  "name": "opencode-telegram",
+  "version": "0.1.0",
+  "description": "Drive OpenCode from Telegram — a v2 plugin that bridges a bot DM to OpenCode sessions.",
+  "type": "module",
+  "license": "MIT",
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "telegram",
+    "bot"
+  ],
+  "scripts": {
+    "harness": "bash test/harness.sh",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@opencode/plugin": "2.0.16"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.2",
+    "typescript": "^5.8.0"
+  }
+}

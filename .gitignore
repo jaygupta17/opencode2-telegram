@@ -1,0 +1,4 @@
+node_modules/
+*.log
+.harness-home/
+.tg-proof
