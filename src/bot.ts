@@ -140,6 +140,10 @@ export class TelegramBot {
     return this.call("sendChatAction", { chat_id: chatId, action })
   }
 
+  deleteMessage(chatId: number, messageID: number): Promise<unknown> {
+    return this.call("deleteMessage", { chat_id: chatId, message_id: messageID })
+  }
+
   answerCallbackQuery(callbackID: string, text?: string): Promise<unknown> {
     return this.call("answerCallbackQuery", {
       callback_query_id: callbackID,
