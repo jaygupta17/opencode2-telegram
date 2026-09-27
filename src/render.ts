@@ -213,17 +213,15 @@ export class Renderer {
     }
 
     switch (ev.type) {
-      // -------------------- thinking blocks (expandable blockquote) --------------------
+      // -------------------- thinking blocks (muted expandable quote, no emoji) --------------------
       case "session.reasoning.started": {
         if (state.finalized || !this.opts.showReasoning || !this.hasRoom(state)) return
         const key = blockKey(data)
         if (state.reasoning.has(key)) return
         state.activityCount++
         state.blocks++
-        const r: ReasoningState = { msgIDs: [], partsLen: 0, buf: "", lastEdit: 0 }
-        state.reasoning.set(key, r)
-        const id = await this.sendActivity(state, "🧠")
-        if (id !== undefined) r.msgIDs.push(id)
+        // no placeholder message: the block appears with its first content
+        state.reasoning.set(key, { msgIDs: [], partsLen: 0, buf: "", lastEdit: 0 })
         return
       }
       case "session.reasoning.delta": {
@@ -446,12 +444,10 @@ export class Renderer {
     }
   }
 
-  // -------------------- reasoning streaming (chunked blockquote) --------------------
+  // -------------------- reasoning streaming (blockquote, no emoji) --------------------
   private reasoningHtml(r: ReasoningState): string {
-    if (!r.buf) return "🧠"
-    return this.htmlOn()
-      ? `🧠\n<blockquote expandable>${esc(r.buf)}</blockquote>`
-      : `🧠\n${r.buf}`
+    if (!r.buf) return ""
+    return this.htmlOn() ? `<blockquote expandable>${esc(r.buf)}</blockquote>` : r.buf
   }
 
   private async maybeFlushReasoning(state: TurnState, r: ReasoningState): Promise<void> {
@@ -473,15 +469,11 @@ export class Renderer {
     if (this.disposed) return
     r.lastEdit = Date.now()
     const full = this.reasoningHtml(r)
+    if (!full) return
     const parts = this.htmlOn() ? splitHtml(full) : [full.length > 4000 ? `${full.slice(0, 3999)}…` : full]
     const html = this.htmlOn()
     const grown = parts.length > r.partsLen
     try {
-      // no content yet -> keep just the "🧠" line, don't touch further
-      if (!r.buf && r.msgIDs.length === 1 && r.partsLen === 0) {
-        r.partsLen = 1
-        return
-      }
       while (r.msgIDs.length < parts.length) {
         const idx = r.msgIDs.length
         const m = await this.send(state, parts[idx] ?? "", { html, silent: true })
