@@ -57,11 +57,24 @@ export default Plugin.define({
 
     // default model for NEW sessions (else opencode's default — may be plan-gated)
     const modelOpt = typeof ctx.options.model === "string" ? ctx.options.model : ""
-    let defaultModel: { providerID: string; id: string } | undefined
+    let defaultModel: { providerID: string; id: string; variant?: string } | undefined
     const slash = modelOpt.indexOf("/")
     if (slash > 0) {
-      defaultModel = { providerID: modelOpt.slice(0, slash), id: modelOpt.slice(slash + 1) }
-      tlog(`default model for new sessions: ${modelOpt}`)
+      const rest = modelOpt.slice(slash + 1)
+      const hash = rest.indexOf("#")
+      const id = hash >= 0 ? rest.slice(0, hash) : rest
+      const modelVariant = hash >= 0 ? rest.slice(hash + 1) : undefined
+      const thinkingOpt = typeof ctx.options.thinking === "string" ? ctx.options.thinking : undefined
+      const variant = thinkingOpt ?? modelVariant
+      defaultModel = {
+        providerID: modelOpt.slice(0, slash),
+        id,
+        ...(variant ? { variant } : {}),
+      }
+      tlog(
+        `default model for new sessions: ${defaultModel.providerID}/${defaultModel.id}` +
+          `${variant ? `#${variant}` : ""}`,
+      )
     }
 
     const ac = new AbortController()
@@ -104,7 +117,9 @@ export default Plugin.define({
           try {
             if (!limitsLoaded) await loadLimits()
             const info = await ctx.session.get({ sessionID })
-            const modelKey = info.model ? `${info.model.providerID}/${info.model.id}` : undefined
+            const modelKey = info.model
+              ? `${info.model.providerID}/${info.model.id}${info.model.variant ? `#${info.model.variant}` : ""}`
+              : undefined
             let contextUsed: number | undefined
             try {
               const msgs = await ctx.session.context({ sessionID })
@@ -120,7 +135,9 @@ export default Plugin.define({
               agent: info.agent ?? undefined,
               cost: typeof info.cost === "number" ? info.cost : undefined,
               contextUsed,
-              contextLimit: modelKey ? modelLimits.get(modelKey) : undefined,
+              contextLimit: info.model
+                ? modelLimits.get(`${info.model.providerID}/${info.model.id}`)
+                : undefined,
             }
           } catch (err) {
             tlog(`stats failed: ${String(err)}`)
@@ -245,6 +262,45 @@ export default Plugin.define({
           cardText?: string
         }): Promise<void> => {
           try {
+            if (cb.data.startsWith("thk:")) {
+              const raw = cb.data.slice(4)
+              try {
+                const sid = await sessions.current(cb.chatId)
+                if (!sid) {
+                  await bot?.answerCallbackQuery(cb.callbackID, "no active session")
+                  return
+                }
+                const info = await ctx.session.get({ sessionID: sid })
+                if (!info.model) {
+                  await bot?.answerCallbackQuery(cb.callbackID, "no model set")
+                  return
+                }
+                const variant = raw === "!clear" ? undefined : raw
+                await ctx.session.switchModel({
+                  sessionID: sid,
+                  model: {
+                    providerID: info.model.providerID,
+                    id: info.model.id,
+                    ...(variant ? { variant } : {}),
+                  },
+                })
+                await bot?.answerCallbackQuery(cb.callbackID, `thinking → ${variant ?? "default"}`)
+                if (cb.messageID !== undefined) {
+                  await bot
+                    ?.editMessageText(
+                      cb.chatId,
+                      cb.messageID,
+                      `🧠 thinking → ${variant ?? "default"}`,
+                      { removeKeyboard: true },
+                    )
+                    .catch(() => {})
+                }
+              } catch (err) {
+                tlog(`thinking switch failed: ${String(err)}`)
+                await bot?.answerCallbackQuery(cb.callbackID, "switch failed")
+              }
+              return
+            }
             if (cb.data.startsWith("agt:")) {
               const agent = cb.data.slice(4)
               try {

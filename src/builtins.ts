@@ -86,6 +86,7 @@ const CORE_MENU: Array<{ command: string; description: string }> = [
   { command: "status", description: "Current session info" },
   { command: "stop", description: "Interrupt the running turn" },
   { command: "model", description: "Show or switch the model" },
+  { command: "thinking", description: "Set the thinking/reasoning variant" },
   { command: "agent", description: "List or switch agents" },
   { command: "history", description: "Show recent messages" },
   { command: "sendfile", description: "Send a local file" },
@@ -114,7 +115,7 @@ export function helpText(registry: Registry): string {
   const builtins = BUILTINS.filter((b) => registry.byTg.get(b.tg) === b)
   const lines: string[] = [
     "🐝 bot",
-    "/new /status /stop /model /agent /history /sendfile /help",
+    "/new /status /stop /model /thinking /agent /history /sendfile /help",
   ]
   if (builtins.length > 0) {
     lines.push("", "⚙️ opencode")

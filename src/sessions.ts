@@ -21,7 +21,7 @@ export class Sessions {
   constructor(
     private readonly ctx: Context,
     private readonly delivery: Delivery,
-    private readonly defaultModel?: { providerID: string; id: string },
+    private readonly defaultModel?: { providerID: string; id: string; variant?: string },
   ) {}
 
   async chatFor(sessionID: string): Promise<string | undefined> {

@@ -12,6 +12,42 @@ export interface UndoStashEntry {
   sessionID: string
 }
 
+/** Variant picker for the current model (thinking/reasoning effort). */
+export async function renderThinkingPicker(
+  ctx: Context,
+  bot: TelegramBot,
+  chatId: number,
+  model: { providerID: string; id: string } | undefined,
+  messageID?: number,
+  current?: string,
+): Promise<void> {
+  let variants: string[] = []
+  if (model) {
+    try {
+      const list = await ctx.model.list()
+      const found = list.data.find(
+        (m) => m.providerID === model.providerID && m.id === model.id,
+      )
+      variants = (found?.variants ?? []).map((v) => v.id).slice(0, 12)
+    } catch {
+      /* list unavailable */
+    }
+  }
+  const rows: Array<Array<{ text: string; callback_data: string }>> = [
+    [{ text: `◻︎ default${!current ? " ✓" : ""}`, callback_data: "thk:!clear" }],
+    ...variants.map((v) => [
+      { text: `${v}${v === current ? " ✓" : ""}`, callback_data: `thk:${v}` },
+    ]),
+  ]
+  const text = `🧠 thinking variant${current ? ` (current: ${current})` : " (default)"} — pick one:`
+  const keyboard = { inline_keyboard: rows }
+  if (messageID !== undefined) {
+    await bot.editMessageText(chatId, messageID, text, { keyboard })
+  } else {
+    await bot.sendMessage(chatId, text, { keyboard })
+  }
+}
+
 /** Paginated model picker (buttons). messageID = edit in place, else send new. */
 export async function renderModelPicker(
   ctx: Context,
@@ -194,6 +230,28 @@ export async function dispatch(input: {
         } catch (err) {
           await reply(`⚠️ sessions unavailable: ${String(err)}`)
         }
+        return
+      }
+
+      case "thinking": {
+        const sid = await sessions.ensure(chatId)
+        const info = await ctx.session.get({ sessionID: sid })
+        const arg = rest[0]
+        if (!info.model) {
+          await reply("no model set on this session — pick one with /model first")
+          return
+        }
+        const modelRef = { providerID: info.model.providerID, id: info.model.id }
+        if (!arg) {
+          await renderThinkingPicker(ctx, bot, chatId, modelRef, undefined, info.model.variant)
+          return
+        }
+        const variant = ["default", "off"].includes(arg.toLowerCase()) ? undefined : arg
+        await ctx.session.switchModel({
+          sessionID: sid,
+          model: { ...modelRef, ...(variant ? { variant } : {}) },
+        })
+        await reply(`🧠 thinking → ${variant ?? "default"}`)
         return
       }
 
