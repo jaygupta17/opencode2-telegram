@@ -87,6 +87,7 @@ export default Plugin.define({
     let refreshTimer: ReturnType<typeof setTimeout> | undefined
     let scheduleRegistryRefresh: (() => void) | undefined
     let invalidateLimits: (() => void) | undefined
+    const sleepTimers: Array<ReturnType<typeof setTimeout> | ReturnType<typeof setInterval>> = []
 
     if (!token) {
       tlog("no token configured — Telegram idle (set options.token or TELEGRAM_BOT_TOKEN)")
@@ -542,6 +543,93 @@ export default Plugin.define({
           onCallback,
           onStopped,
         }).catch((err) => tlog(`poll loop crashed: ${String(err)}`))
+
+        // ---- proactive scheduler (holder only): sleep check ----
+        // The plugin holds the bot token + registered chats, so it can message
+        // unprompted — no OpenCode-native cron needed. Options:
+        //   scheduler: { sleepCheck: "HH:MM" | false, timezone: "Asia/Kolkata" }
+        const schedOpt = (ctx.options.scheduler ?? {}) as {
+          sleepCheck?: string | false
+          timezone?: string
+        }
+        const sleepAt = schedOpt.sleepCheck === undefined ? "23:00" : schedOpt.sleepCheck
+        const schedTz =
+          typeof schedOpt.timezone === "string" && schedOpt.timezone
+            ? schedOpt.timezone
+            : "Asia/Kolkata"
+        if (typeof sleepAt === "string") {
+          const mm = /^(\d{1,2}):(\d{2})$/.exec(sleepAt.trim())
+          if (!mm) {
+            tlog(`bad scheduler.sleepCheck "${sleepAt}" — want "HH:MM" or false`)
+          } else {
+            const targetMin = Number(mm[1]) * 60 + Number(mm[2])
+            const tzDay = (): string =>
+              new Intl.DateTimeFormat("en-CA", {
+                timeZone: schedTz,
+                year: "numeric",
+                month: "2-digit",
+                day: "2-digit",
+              }).format(new Date())
+            const tzMinutes = (): number => {
+              const parts = new Intl.DateTimeFormat("en-GB", {
+                timeZone: schedTz,
+                hour: "numeric",
+                minute: "numeric",
+                hour12: false,
+              }).format(new Date())
+              const [h, min] = parts.split(":").map(Number)
+              return (h % 24) * 60 + (min ?? 0)
+            }
+            const fireSleepCheck = async (): Promise<void> => {
+              try {
+                const key = `tg:sleepcheck:${tzDay()}`
+                if (await ctx.storage.get(key)) return // already sent today
+                await ctx.storage.set(key, Date.now())
+                const ids = await sessions.allChats()
+                for (const id of ids) {
+                  await bot
+                    ?.sendMessage(
+                      Number(id),
+                      "🌙 11pm — deal's a deal. Screens off, see you at 7 😴",
+                    )
+                    .catch(() => {})
+                }
+                tlog(`sleep check sent to ${ids.length} chat(s)`)
+              } catch (err) {
+                tlog(`sleep check failed: ${String(err)}`)
+              }
+            }
+            const armDaily = (): void => {
+              if (ac.signal.aborted) return
+              const daily = setInterval(() => {
+                void fireSleepCheck()
+              }, 24 * 3600 * 1000)
+              daily.unref?.()
+              sleepTimers.push(daily)
+            }
+            const armOnce = (ms: number): void => {
+              if (ac.signal.aborted) return
+              const t = setTimeout(() => {
+                void fireSleepCheck().finally(armDaily)
+              }, ms)
+              t.unref?.()
+              sleepTimers.push(t)
+            }
+            const nowMin = tzMinutes()
+            if (nowMin >= targetMin) {
+              // past today's time (late start / was down at 23:00) — catch up once
+              tlog("sleep check time already passed today — catching up")
+              void fireSleepCheck().finally(() => {
+                const deltaMin = (targetMin - tzMinutes() + 1440) % 1440
+                armOnce((deltaMin === 0 ? 1440 : deltaMin) * 60 * 1000)
+              })
+            } else {
+              const ms = (targetMin - nowMin) * 60 * 1000
+              tlog(`sleep check armed for ${sleepAt} ${schedTz} (in ~${Math.round(ms / 60000)}m)`)
+              armOnce(ms)
+            }
+          }
+        }
       }
 
       lease = acquireLease(
@@ -602,6 +690,11 @@ export default Plugin.define({
     return () => {
       if (refreshTimer) clearTimeout(refreshTimer)
       if (leaseRetry) clearInterval(leaseRetry)
+      for (const t of sleepTimers) {
+        clearTimeout(t as ReturnType<typeof setTimeout>)
+        clearInterval(t as ReturnType<typeof setInterval>)
+      }
+      sleepTimers.length = 0
       renderer?.dispose()
       lease?.release()
       ac.abort()
