@@ -556,12 +556,15 @@ export class Renderer {
         if (!this.hasRoom(state)) return
         state.activityCount++
         state.blocks++
-        const inputText =
-          ev.type === "session.tool.input.ended"
-            ? String(data.text ?? "")
-            : singleLine(JSON.stringify(data.input ?? {}) ?? "", 200)
+        // Never dump raw tool input: edit/write payloads are kilobytes of
+        // code that drown the chat. One-line per-tool summaries instead.
+        const toolName = String(data.name ?? call.name ?? "tool")
+        const inputText = toolInputSummary(
+          toolName,
+          ev.type === "session.tool.input.ended" ? data.text : data.input,
+        )
         call.t0 = (ev as { created?: number }).created ?? Date.now()
-        call.callMsgID = await this.sendActivity(state, this.toolCallLine(call.name, inputText))
+        call.callMsgID = await this.sendActivity(state, this.toolCallLine(toolName, inputText))
         return
       }
 
@@ -1124,6 +1127,56 @@ interface TurnState {
 const singleLine = (s: string, max: number): string => {
   const flat = s.replace(/\s+/g, " ").trim()
   return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat
+}
+
+/**
+ * One-line human summary of a tool call's input for the activity feed.
+ * Raw payloads (edit/write bodies, question JSON) are never dumped —
+ * the chat gets `Edit <file> (a→b chars)`, not kilobytes of code.
+ */
+const toolInputSummary = (name: string, raw: unknown): string => {
+  let input: Record<string, unknown> = {}
+  try {
+    input =
+      typeof raw === "string"
+        ? (JSON.parse(raw) as Record<string, unknown>)
+        : (raw as Record<string, unknown>)
+  } catch {
+    return singleLine(String(raw ?? ""), 160)
+  }
+  if (!input || typeof input !== "object") return singleLine(String(raw ?? ""), 160)
+  const s = (v: unknown, n: number): string => singleLine(String(v ?? ""), n)
+  switch (name) {
+    case "edit": {
+      const from = String(input.oldString ?? "").length
+      const to = String(input.newString ?? "").length
+      return `${s(input.path, 80)} (${from}→${to} chars)`
+    }
+    case "write":
+      return `${s(input.path, 80)} (${String(input.content ?? "").length} chars)`
+    case "read":
+      return s(input.path, 100)
+    case "glob":
+      return `“${s(input.pattern, 60)}”${input.path ? ` in ${s(input.path, 60)}` : ""}`
+    case "grep":
+      return `“${s(input.pattern, 60)}”${input.path ? ` in ${s(input.path, 60)}` : ""}`
+    case "shell":
+      return s(input.command ?? input.description, 160)
+    case "question": {
+      const qs = Array.isArray(input.questions)
+        ? (input.questions as Array<{ question?: string }>)
+        : []
+      return qs.length > 0 ? `${qs.length} question(s): ${s(qs[0]?.question, 100)}` : "questions"
+    }
+    case "subagent":
+      return s((input as { description?: string }).description, 120)
+    case "webfetch":
+      return s(input.url, 120)
+    case "websearch":
+      return `“${s(input.query, 100)}”`
+    default:
+      return singleLine(JSON.stringify(input) ?? "", 160)
+  }
 }
 
 const errText = (err: unknown): string => {
