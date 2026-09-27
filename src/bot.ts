@@ -5,6 +5,9 @@ import { stripTags } from "./format.js"
 export interface TelegramMessage {
   message_id: number
   text?: string
+  caption?: string
+  photo?: Array<{ file_id: string; file_size?: number; width: number; height: number }>
+  document?: { file_id: string; file_name?: string; mime_type?: string; file_size?: number }
   chat: { id: number; type: string }
   from?: { id: number; username?: string; first_name?: string }
 }
@@ -35,6 +38,8 @@ export interface SendOpts {
   silent?: boolean
   /** attach the [⏹ Stop] inline button */
   stopButton?: boolean
+  /** raw reply_markup (inline keyboard) — takes precedence over stopButton */
+  keyboard?: unknown
 }
 
 export interface EditOpts extends SendOpts {
@@ -89,7 +94,11 @@ export class TelegramBot {
       ...(opts.html ? { parse_mode: "HTML" } : {}),
       ...(opts.silent ? { disable_notification: true } : {}),
       link_preview_options: NO_PREVIEW,
-      ...(opts.stopButton ? { reply_markup: STOP_BUTTON } : {}),
+      ...(opts.keyboard
+        ? { reply_markup: opts.keyboard }
+        : opts.stopButton
+          ? { reply_markup: STOP_BUTTON }
+          : {}),
     }
   }
 
@@ -162,6 +171,43 @@ export class TelegramBot {
 
   setMyShortDescription(short: string): Promise<unknown> {
     return this.call("setMyShortDescription", { short_description: short })
+  }
+
+  // ---- files ----
+  getFile(fileID: string): Promise<{ file_id: string; file_path: string; file_size?: number }> {
+    return this.call("getFile", { file_id: fileID })
+  }
+
+  /** Download a Telegram file to a local path. Returns the path. */
+  async downloadFile(filePath: string, destPath: string): Promise<string> {
+    const res = await fetch(`https://api.telegram.org/file/bot${this.cfg.token}/${filePath}`)
+    if (!res.ok) throw new Error(`file download failed: ${res.status}`)
+    const buf = Buffer.from(await res.arrayBuffer())
+    const { writeFile, mkdir } = await import("node:fs/promises")
+    const { dirname } = await import("node:path")
+    await mkdir(dirname(destPath), { recursive: true })
+    await writeFile(destPath, buf)
+    return destPath
+  }
+
+  /** Upload a local image as a photo (multipart). Falls back to document on failure. */
+  async sendPhoto(chatId: number, filePath: string, caption?: string): Promise<unknown> {
+    const { readFile } = await import("node:fs/promises")
+    const { basename } = await import("node:path")
+    const bytes = await readFile(filePath)
+    const form = new FormData()
+    form.append("chat_id", String(chatId))
+    if (caption) form.append("caption", caption.slice(0, 1000))
+    form.append("photo", new Blob([new Uint8Array(bytes)]), basename(filePath))
+    const res = await fetch(`https://api.telegram.org/bot${this.cfg.token}/sendPhoto`, {
+      method: "POST",
+      body: form,
+    })
+    const json = (await res.json()) as ApiEnvelope<unknown>
+    if (!json.ok) {
+      throw new Error(`telegram sendPhoto failed: ${json.error_code} ${json.description ?? ""}`)
+    }
+    return json.result
   }
 
   answerCallbackQuery(callbackID: string, text?: string): Promise<unknown> {

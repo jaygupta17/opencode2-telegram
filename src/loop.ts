@@ -122,7 +122,13 @@ async function route(
   update: TelegramUpdate,
   handlers: {
     onMessage: (msg: TelegramMessage) => Promise<void>
-    onCallback: (cb: { callbackID: string; chatId: number; data: string }) => Promise<void>
+    onCallback: (cb: {
+      callbackID: string
+      chatId: number
+      data: string
+      messageID?: number
+      cardText?: string
+    }) => Promise<void>
   },
 ): Promise<void> {
   const cb = update.callback_query
@@ -133,7 +139,13 @@ async function route(
       await bot.answerCallbackQuery(cb.id).catch(() => {})
       return
     }
-    await handlers.onCallback({ callbackID: cb.id, chatId: Number(chatId), data: cb.data ?? "" })
+    await handlers.onCallback({
+      callbackID: cb.id,
+      chatId: Number(chatId),
+      data: cb.data ?? "",
+      messageID: cb.message?.message_id,
+      cardText: cb.message?.text,
+    })
     return
   }
   const msg = update.message
@@ -154,8 +166,8 @@ async function route(
     await bot.sendMessage(msg.chat.id, `chat_id: ${chatId}\n\nAdd it to options.allowFrom in opencode.json to lock the bot to your account.`)
     return
   }
-  if (!msg.text) {
-    await bot.sendMessage(msg.chat.id, "text only for now (attachments: later phase)").catch(() => {})
+  if (!msg.text && !(msg.photo && msg.photo.length > 0) && !msg.document) {
+    await bot.sendMessage(msg.chat.id, "unsupported message type").catch(() => {})
     return
   }
   await handlers.onMessage(msg)
@@ -167,7 +179,13 @@ export async function runPollLoop(opts: {
   lease: Lease
   signal: AbortSignal
   onMessage: (msg: TelegramMessage) => Promise<void>
-  onCallback: (cb: { callbackID: string; chatId: number; data: string }) => Promise<void>
+  onCallback: (cb: {
+    callbackID: string
+    chatId: number
+    data: string
+    messageID?: number
+    cardText?: string
+  }) => Promise<void>
 }): Promise<void> {
   const { bot, cfg, lease, signal, onMessage, onCallback } = opts
   let backoffMs = 2_000

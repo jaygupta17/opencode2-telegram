@@ -1,4 +1,5 @@
 import type { V2Event } from "@opencode/client"
+import { stat } from "node:fs/promises"
 import type { TelegramBot } from "./bot.js"
 import type { Sessions } from "./sessions.js"
 import { tlog } from "./log.js"
@@ -21,6 +22,8 @@ export interface RendererOptions {
   stopButton: boolean
   /** max chars of tool output shown inside the expandable blockquote */
   toolOutputChars: number
+  /** auto-send local images referenced in the final answer */
+  autoImages: boolean
 }
 
 /**
@@ -98,6 +101,11 @@ export class Renderer {
     const sessionID = data?.sessionID
     if (!sessionID) return
 
+    if (ev.type === "permission.asked") {
+      await this.permissionCard(data)
+      return
+    }
+
     if (ev.type === "session.execution.started") {
       const chatId = await this.sessions.chatFor(sessionID)
       if (!chatId) return
@@ -130,6 +138,35 @@ export class Renderer {
 
   private hasRoom(state: TurnState): boolean {
     return state.activityCount < this.opts.maxActivityMessages
+  }
+
+  // -------------------- permission cards --------------------
+  private async permissionCard(data: Record<string, unknown>): Promise<void> {
+    const sessionID = typeof data.sessionID === "string" ? data.sessionID : undefined
+    const id = typeof data.id === "string" ? data.id : ""
+    if (!sessionID || !id) return
+    const chatId = await this.sessions.chatFor(sessionID)
+    if (!chatId) return
+    this.sessions.rememberRequest(id, sessionID)
+
+    const action = String(data.action ?? "action")
+    const resources = Array.isArray(data.resources) ? (data.resources as unknown[]).map(String) : []
+    const lines = [`🔐 <b>${esc(action)}</b> permission needed`]
+    if (resources.length > 0) {
+      lines.push(`<code>${esc(singleLine(resources.join(", "), 400))}</code>`)
+    }
+    if (data.message) lines.push(esc(String(data.message)))
+
+    const keyboard = {
+      inline_keyboard: [
+        [{ text: "✅ Allow once", callback_data: `perm:once:${id}` }],
+        [{ text: "♾️ Allow always", callback_data: `perm:always:${id}` }],
+        [{ text: "🚫 Reject", callback_data: `perm:reject:${id}` }],
+      ],
+    }
+    await this.enqueue(Number(chatId), () =>
+      this.bot.sendMessage(Number(chatId), lines.join("\n"), { html: true, keyboard }),
+    )
   }
 
   private htmlOn(): boolean {
@@ -538,12 +575,45 @@ export class Renderer {
       await this.send(state, "✅", { silent: false })
     }
 
+    // images referenced in the final answer
+    if (outcome === "ok") {
+      await this.sendDetectedImages(state)
+    }
+
     // outcome reaction on the user's prompt message
     const promptID = this.lastPrompt.get(state.chatId)
     if (promptID !== undefined && outcome !== "interrupt") {
       void this.bot
         .setMessageReaction(Number(state.chatId), promptID, outcome === "ok" ? "✅" : "❌")
         .catch(() => {})
+    }
+  }
+
+  /** Send local images referenced in the final text as photo messages. */
+  private async sendDetectedImages(state: TurnState): Promise<void> {
+    if (!this.opts.autoImages) return
+    const raw = [...state.texts.values()].map((b) => this.textRaw(b)).join("\n")
+    if (!raw) return
+    const re = /(?:^|[\s`'"(])((?:~\/|\/)[\w@./-]+\.(?:png|jpe?g|gif|webp))(?=$|[\s`'")])/gim
+    const seen = new Set<string>()
+    let sent = 0
+    for (const m of raw.matchAll(re)) {
+      if (sent >= 5) break
+      const p = (m[1] as string).replace(/^~/, process.env.HOME ?? "~")
+      if (seen.has(p)) continue
+      seen.add(p)
+      try {
+        const st = await stat(p)
+        if (!st.isFile() || st.size > 10 * 1024 * 1024) continue
+      } catch {
+        continue
+      }
+      sent++
+      await this.enqueue(Number(state.chatId), () =>
+        this.bot
+          .sendPhoto(Number(state.chatId), p)
+          .catch((err: unknown) => tlog(`sendPhoto failed: ${String(err)}`)),
+      )
     }
   }
 

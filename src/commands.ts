@@ -13,6 +13,7 @@ const HELP = `opencode-telegram commands:
 /agent     list agents · /agent <id> switches
 /model     current model · /model <provider>/<id> switches
 /history [n]  last messages (default 6)
+/sendfile <path>  send a local file to this chat
 /help      this message`
 
 
@@ -143,6 +144,29 @@ export async function dispatch(input: {
           }
         }
         await reply(lines.length ? lines.join("\n\n") : "(empty session)")
+        return
+      }
+
+      case "sendfile": {
+        const p = rest.join(" ").trim()
+        if (!p) {
+          await reply("usage: /sendfile <path>")
+          return
+        }
+        const { stat } = await import("node:fs/promises")
+        try {
+          const st = await stat(p)
+          if (!st.isFile()) throw new Error("not a file")
+        } catch {
+          await reply(`⚠️ not a readable file: ${p}`)
+          return
+        }
+        try {
+          await bot.sendPhoto(chatId, p, p)
+          await reply("📎 sent")
+        } catch (err) {
+          await reply(`⚠️ send failed: ${String(err)}`)
+        }
         return
       }
 

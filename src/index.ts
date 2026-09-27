@@ -1,4 +1,6 @@
 import { Plugin } from "@opencode/plugin"
+import { homedir } from "node:os"
+import { basename, join } from "node:path"
 import { tlog } from "./log.js"
 import { acquireLease, runPollLoop, type Lease } from "./loop.js"
 import { TelegramBot, type TelegramConfig, type TelegramMessage } from "./bot.js"
@@ -47,6 +49,7 @@ export default Plugin.define({
     const stopButtonOn = ctx.options.stopButton !== false
     const toolOutputChars =
       typeof ctx.options.toolOutputChars === "number" ? ctx.options.toolOutputChars : 3000
+    const autoImages = ctx.options.autoImages !== false
 
     // default model for NEW sessions (else opencode's default — may be plan-gated)
     const modelOpt = typeof ctx.options.model === "string" ? ctx.options.model : ""
@@ -81,6 +84,7 @@ export default Plugin.define({
           typing: typingOn,
           stopButton: stopButtonOn,
           toolOutputChars,
+          autoImages,
         })
         tlog(
           `telegram holder active (offset=${lease.offset}, delivery=${delivery}, ` +
@@ -98,6 +102,7 @@ export default Plugin.define({
             { command: "agent", description: "List or switch agents" },
             { command: "model", description: "Show or switch the model" },
             { command: "history", description: "Show recent messages" },
+            { command: "sendfile", description: "Send a local file to the chat" },
             { command: "help", description: "Show all commands" },
             { command: "start", description: "Introduction" },
           ])
@@ -109,6 +114,36 @@ export default Plugin.define({
 
         const onMessage = async (msg: TelegramMessage): Promise<void> => {
           try {
+            const photo =
+              msg.photo && msg.photo.length > 0 ? msg.photo[msg.photo.length - 1] : undefined
+            const doc =
+              msg.document && msg.document.mime_type?.startsWith("image/") ? msg.document : undefined
+            const fileID = photo?.file_id ?? doc?.file_id
+            if (fileID) {
+              const meta = await (bot as TelegramBot).getFile(fileID)
+              const ext = meta.file_path.includes(".")
+                ? meta.file_path.slice(meta.file_path.lastIndexOf("."))
+                : ".jpg"
+              const dest = join(
+                homedir(),
+                ".cache",
+                "opencode-telegram",
+                "uploads",
+                `${Date.now()}-${Math.random().toString(36).slice(2, 8)}${ext}`,
+              )
+              await (bot as TelegramBot).downloadFile(meta.file_path, dest)
+              const caption = msg.caption ?? "Look at this image"
+              renderer?.notePromptMessage(msg.chat.id, msg.message_id)
+              const sid = await sessions.prompt(msg.chat.id, caption, [
+                { uri: `file://${dest}`, name: basename(dest) },
+              ])
+              tlog(`prompt (image) → session ${sid}`)
+              return
+            }
+            if (msg.document) {
+              await bot?.sendMessage(msg.chat.id, "only images are supported for now")
+              return
+            }
             const text = msg.text ?? ""
             if (text.startsWith("/")) {
               await dispatch({ ctx, bot: bot as TelegramBot, chatId: msg.chat.id, text, sessions })
@@ -127,8 +162,43 @@ export default Plugin.define({
           callbackID: string
           chatId: number
           data: string
+          messageID?: number
+          cardText?: string
         }): Promise<void> => {
           try {
+            if (cb.data.startsWith("perm:")) {
+              const parts = cb.data.split(":")
+              const reply = parts[1]
+              const requestID = parts.slice(2).join(":")
+              if (!requestID || !["once", "always", "reject"].includes(reply ?? "")) {
+                await bot?.answerCallbackQuery(cb.callbackID, "expired")
+                return
+              }
+              const sid = sessions.sessionForRequest(requestID)
+              if (!sid) {
+                await bot?.answerCallbackQuery(cb.callbackID, "expired — reply from the app instead")
+                return
+              }
+              await ctx.permission.reply({
+                sessionID: sid,
+                requestID,
+                decision: reply as "once" | "always" | "reject",
+              })
+              sessions.forgetRequest(requestID)
+              const mark =
+                reply === "reject" ? "🚫 rejected" : reply === "always" ? "♾️ allowed (always)" : "✅ allowed (once)"
+              await bot?.answerCallbackQuery(cb.callbackID, mark)
+              if (cb.messageID !== undefined) {
+                const card = cb.cardText ?? "permission"
+                await bot
+                  ?.editMessageText(cb.chatId, cb.messageID, `${card}\n\n${mark}`, {
+                    html: true,
+                    removeKeyboard: true,
+                  })
+                  .catch(() => {})
+              }
+              return
+            }
             if (cb.data === "stop") {
               const sid = await sessions.current(cb.chatId)
               if (!sid) {

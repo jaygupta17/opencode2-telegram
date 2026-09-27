@@ -15,6 +15,8 @@ type Delivery = "steer" | "queue"
  */
 export class Sessions {
   private readonly cache = new Map<string, string | null>()
+  /** pending permission request id -> session id (callback routing) */
+  private readonly requests = new Map<string, string>()
 
   constructor(
     private readonly ctx: Context,
@@ -66,10 +68,32 @@ export class Sessions {
   }
 
   /** Route user text into the session (delivery controls busy behavior). */
-  async prompt(chatId: number, text: string): Promise<string> {
+  async prompt(
+    chatId: number,
+    text: string,
+    files?: Array<{ uri: string; name?: string }>,
+  ): Promise<string> {
     const sessionID = await this.ensure(chatId)
-    await this.ctx.session.prompt({ sessionID, text, delivery: this.delivery })
+    await this.ctx.session.prompt({
+      sessionID,
+      text,
+      delivery: this.delivery,
+      ...(files && files.length > 0 ? { files } : {}),
+    })
     return sessionID
+  }
+
+  // ---- permission request routing ----
+  rememberRequest(requestID: string, sessionID: string): void {
+    this.requests.set(requestID, sessionID)
+  }
+
+  sessionForRequest(requestID: string): string | undefined {
+    return this.requests.get(requestID)
+  }
+
+  forgetRequest(requestID: string): void {
+    this.requests.delete(requestID)
   }
 }
 
