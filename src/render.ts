@@ -26,6 +26,20 @@ export interface RendererOptions {
   autoImages: boolean
   /** text streaming transport: native drafts or live message edits */
   streaming: "drafts" | "edits"
+  /** append a stats line (model/agent/cost/context) to the turn-end message */
+  stats: boolean
+  /** stats provider injected from the entry (session.get + model limits) */
+  getStats?: (sessionID: string) => Promise<StatsInfo | undefined>
+}
+
+export interface StatsInfo {
+  model?: string
+  agent?: string
+  /** cumulative session cost in USD */
+  cost?: number
+  /** current context usage (tokens) */
+  contextUsed?: number
+  contextLimit?: number
 }
 
 /**
@@ -112,6 +126,7 @@ export class Renderer {
       const chatId = await this.sessions.chatFor(sessionID)
       if (!chatId) return
       const state: TurnState = {
+        sessionID,
         chatId,
         reasoning: new Map(),
         tools: new Map(),
@@ -639,17 +654,21 @@ export class Renderer {
       )
     }
 
-    // markers are their own messages
-    if (marker) {
-      await this.send(state, marker, { silent: marker.startsWith("⏹") })
-    } else if (state.blocks === 0) {
-      await this.send(state, "✅", { silent: false })
-    }
-
     // images referenced in the final answer
     if (outcome === "ok") {
       await this.sendDetectedImages(state)
     }
+
+    // turn-end status: outcome marker + stats (always exactly one message)
+    const stats = this.opts.stats
+      ? await this.opts.getStats?.(state.sessionID).catch(() => undefined)
+      : undefined
+    const head = marker ?? "✅"
+    const statsPart = stats ? this.statsLine(stats) : ""
+    await this.send(state, statsPart ? `${head} · ${statsPart}` : head, {
+      html: this.htmlOn(),
+      silent: true,
+    })
 
     // outcome reaction on the user's prompt message
     const promptID = this.lastPrompt.get(state.chatId)
@@ -658,6 +677,24 @@ export class Renderer {
         .setMessageReaction(Number(state.chatId), promptID, outcome === "ok" ? "✅" : "❌")
         .catch(() => {})
     }
+  }
+
+  private statsLine(s: StatsInfo): string {
+    const parts: string[] = []
+    if (s.model) parts.push(this.htmlOn() ? `<code>${esc(s.model)}</code>` : s.model)
+    if (s.agent) parts.push(s.agent)
+    if (typeof s.cost === "number" && s.cost > 0) {
+      parts.push(s.cost >= 1 ? `$${s.cost.toFixed(2)}` : `$${s.cost.toFixed(4)}`)
+    }
+    if (s.contextUsed !== undefined) {
+      if (s.contextLimit) {
+        const pct = Math.round((s.contextUsed / s.contextLimit) * 100)
+        parts.push(`ctx ${fmtK(s.contextUsed)}/${fmtK(s.contextLimit)} (${pct}%)`)
+      } else {
+        parts.push(`ctx ${fmtK(s.contextUsed)}`)
+      }
+    }
+    return parts.join(" · ")
   }
 
   /** Send local images referenced in the final text as photo messages. */
@@ -728,6 +765,7 @@ interface TextBlock {
 }
 
 interface TurnState {
+  sessionID: string
   chatId: string
   placeholderID?: number
   /** drafts mode: animated preview id (same id per turn) */
@@ -753,6 +791,8 @@ const errText = (err: unknown): string => {
 }
 
 const fmtDur = (ms: number): string => `${(ms / 1000).toFixed(1)}s`
+
+const fmtK = (n: number): string => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n))
 
 const blockKey = (data: Record<string, unknown>): string =>
   `${String(data.assistantMessageID ?? "?")}:${String(data.ordinal ?? 0)}`

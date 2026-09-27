@@ -5,7 +5,7 @@ import { tlog } from "./log.js"
 import { acquireLease, runPollLoop, type Lease } from "./loop.js"
 import { TelegramBot, type TelegramConfig, type TelegramMessage } from "./bot.js"
 import { Sessions } from "./sessions.js"
-import { Renderer } from "./render.js"
+import { Renderer, type StatsInfo } from "./render.js"
 import { dispatch, renderModelPicker, type UndoStashEntry } from "./commands.js"
 import { buildRegistry, syncMenu } from "./builtins.js"
 import { apiCall, configureLocalApi } from "./local-api.js"
@@ -49,6 +49,7 @@ export default Plugin.define({
     const formatting: "html" | "plain" = ctx.options.formatting === "plain" ? "plain" : "html"
     const typingOn = ctx.options.typing !== false
     const stopButtonOn = ctx.options.stopButton !== false
+    const statsOn = ctx.options.stats !== false
     const toolOutputChars =
       typeof ctx.options.toolOutputChars === "number" ? ctx.options.toolOutputChars : 3000
     const autoImages = ctx.options.autoImages !== false
@@ -71,6 +72,7 @@ export default Plugin.define({
     let renderer: Renderer | undefined
     let refreshTimer: ReturnType<typeof setTimeout> | undefined
     let scheduleRegistryRefresh: (() => void) | undefined
+    let invalidateLimits: (() => void) | undefined
 
     if (!token) {
       tlog("no token configured — Telegram idle (set options.token or TELEGRAM_BOT_TOKEN)")
@@ -80,6 +82,52 @@ export default Plugin.define({
         tlog("loop owned by another opencode process (pid lease busy) — standing down")
         lease = undefined
       } else {
+        // stats provider: session info + per-model context limits
+        const modelLimits = new Map<string, number>()
+        let limitsLoaded = false
+        invalidateLimits = () => {
+          limitsLoaded = false
+        }
+        const loadLimits = async (): Promise<void> => {
+          try {
+            const list = await ctx.model.list()
+            for (const m of list.data) {
+              const limit = m.limit?.context
+              if (limit) modelLimits.set(`${m.providerID}/${m.id}`, limit)
+            }
+            limitsLoaded = true
+          } catch (err) {
+            tlog(`model limit load failed: ${String(err)}`)
+          }
+        }
+        const getStats = async (sessionID: string): Promise<StatsInfo | undefined> => {
+          try {
+            if (!limitsLoaded) await loadLimits()
+            const info = await ctx.session.get({ sessionID })
+            const modelKey = info.model ? `${info.model.providerID}/${info.model.id}` : undefined
+            let contextUsed: number | undefined
+            try {
+              const msgs = await ctx.session.context({ sessionID })
+              const last = [...msgs].reverse().find((m) => m.type === "assistant")
+              if (last && last.type === "assistant" && last.tokens) {
+                contextUsed = (last.tokens.input ?? 0) + (last.tokens.cache?.read ?? 0)
+              }
+            } catch {
+              /* context unavailable */
+            }
+            return {
+              model: modelKey,
+              agent: info.agent ?? undefined,
+              cost: typeof info.cost === "number" ? info.cost : undefined,
+              contextUsed,
+              contextLimit: modelKey ? modelLimits.get(modelKey) : undefined,
+            }
+          } catch (err) {
+            tlog(`stats failed: ${String(err)}`)
+            return undefined
+          }
+        }
+
         renderer = new Renderer(bot as TelegramBot, sessions, {
           throttleMs,
           activity: activityOn,
@@ -91,6 +139,8 @@ export default Plugin.define({
           toolOutputChars,
           autoImages,
           streaming,
+          stats: statsOn,
+          getStats,
         })
         tlog(
           `telegram holder active (offset=${lease.offset}, delivery=${delivery}, ` +
@@ -416,6 +466,9 @@ export default Plugin.define({
             }
             if (event.type === "command.updated" && scheduleRegistryRefresh) {
               scheduleRegistryRefresh()
+            }
+            if (event.type === "model.updated" && invalidateLimits) {
+              invalidateLimits()
             }
           }
         }
