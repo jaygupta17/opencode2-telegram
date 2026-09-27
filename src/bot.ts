@@ -144,6 +144,26 @@ export class TelegramBot {
     return this.call("deleteMessage", { chat_id: chatId, message_id: messageID })
   }
 
+  setMessageReaction(chatId: number, messageID: number, emoji: string): Promise<unknown> {
+    return this.call("setMessageReaction", {
+      chat_id: chatId,
+      message_id: messageID,
+      reaction: [{ type: "emoji", emoji }],
+    })
+  }
+
+  setMyCommands(commands: Array<{ command: string; description: string }>): Promise<unknown> {
+    return this.call("setMyCommands", { commands })
+  }
+
+  setMyDescription(description: string): Promise<unknown> {
+    return this.call("setMyDescription", { description })
+  }
+
+  setMyShortDescription(short: string): Promise<unknown> {
+    return this.call("setMyShortDescription", { short_description: short })
+  }
+
   answerCallbackQuery(callbackID: string, text?: string): Promise<unknown> {
     return this.call("answerCallbackQuery", {
       callback_query_id: callbackID,

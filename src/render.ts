@@ -19,6 +19,8 @@ export interface RendererOptions {
   typing: boolean
   /** [⏹ Stop] inline button on the placeholder */
   stopButton: boolean
+  /** max chars of tool output shown inside the expandable blockquote */
+  toolOutputChars: number
 }
 
 /**
@@ -42,6 +44,8 @@ export interface RendererOptions {
 export class Renderer {
   private readonly turns = new Map<string, TurnState>()
   private readonly queues = new Map<string, Promise<void>>()
+  /** last user prompt message per chat — gets the outcome reaction */
+  private readonly lastPrompt = new Map<string, number>()
   private disposed = false
 
   constructor(
@@ -137,36 +141,37 @@ export class Renderer {
     const data = ev.data as Record<string, unknown> & { sessionID: string }
 
     switch (ev.type) {
-      // -------------------- thinking blocks --------------------
+      // -------------------- thinking blocks (expandable blockquote) --------------------
       case "session.reasoning.started": {
         if (state.finalized || !this.opts.showReasoning || !this.hasRoom(state)) return
         const key = blockKey(data)
         if (state.reasoning.has(key)) return
         state.activityCount++
         state.blocks++
-        const r: ReasoningState = { buf: "🧠", lastEdit: 0 }
+        const r: ReasoningState = { msgIDs: [], partsLen: 0, buf: "", lastEdit: 0 }
         state.reasoning.set(key, r)
-        r.msgID = await this.sendActivity(state, "🧠")
+        const id = await this.sendActivity(state, "🧠")
+        if (id !== undefined) r.msgIDs.push(id)
         return
       }
       case "session.reasoning.delta": {
         if (state.finalized) return
         const r = state.reasoning.get(blockKey(data))
-        if (!r || r.msgID === undefined) return
+        if (!r) return
         r.buf += String(data.delta)
-        if (Date.now() - r.lastEdit >= this.opts.throttleMs) {
-          r.lastEdit = Date.now()
-          await this.editActivity(state, r.msgID, singleLine(r.buf, 4000))
-        }
+        await this.maybeFlushReasoning(state, r)
         return
       }
       case "session.reasoning.ended": {
         if (state.finalized) return
         const r = state.reasoning.get(blockKey(data))
-        if (!r || r.msgID === undefined) return
-        const final = singleLine(String(data.text ?? r.buf), 4000)
-        r.buf = final
-        await this.editActivity(state, r.msgID, final) // last edit of this block
+        if (!r) return
+        r.buf = String(data.text ?? r.buf)
+        if (r.timer) {
+          clearTimeout(r.timer)
+          r.timer = undefined
+        }
+        await this.flushReasoning(state, r)
         return
       }
 
@@ -214,9 +219,11 @@ export class Renderer {
         state.activityCount++
         state.blocks++
         call.resultSent = true
-        const snippet = this.contentSnippet(data.content)
+        const output = this.outputText(data.content)
         const dur = call.t0 ? fmtDur(((ev as { created?: number }).created ?? Date.now()) - call.t0) : ""
-        await this.sendActivity(state, this.toolResultLine(true, call.name, dur, snippet))
+        for (const part of this.toolResultParts(true, call.name, dur, output)) {
+          await this.sendActivity(state, part)
+        }
         return
       }
       case "session.tool.failed": {
@@ -229,7 +236,9 @@ export class Renderer {
         state.blocks++
         call.resultSent = true
         const dur = call.t0 ? fmtDur(((ev as { created?: number }).created ?? Date.now()) - call.t0) : ""
-        await this.sendActivity(state, this.toolResultLine(false, call.name, dur, errText(data.error)))
+        for (const part of this.toolResultParts(false, call.name, dur, errText(data.error))) {
+          await this.sendActivity(state, part)
+        }
         return
       }
 
@@ -258,17 +267,17 @@ export class Renderer {
 
       // -------------------- terminal --------------------
       case "session.execution.succeeded": {
-        await this.finish(state, undefined)
+        await this.finish(state, undefined, "ok")
         return
       }
       case "session.execution.interrupted": {
-        await this.finish(state, "⏹ interrupted")
+        await this.finish(state, "⏹ interrupted", "interrupt")
         return
       }
       case "session.execution.failed": {
         const msg = errText(data.error)
         tlog(`execution failed: ${msg}`)
-        await this.finish(state, `❌ ${msg}`)
+        await this.finish(state, `❌ ${msg}`, "fail")
         return
       }
       default:
@@ -295,23 +304,29 @@ export class Renderer {
 
   private toolCallLine(name: string, input: string): string {
     const n = singleLine(name, 40)
-    const i = singleLine(input, 250)
+    const i = singleLine(input, 800)
     if (!this.htmlOn()) return i ? `🔧 ${n}: ${i}` : `🔧 ${n}`
     return i ? `🔧 <code>${esc(n)}</code>: <code>${esc(i)}</code>` : `🔧 <code>${esc(n)}</code>`
   }
 
-  private toolResultLine(ok: boolean, name: string, dur: string, detail: string): string {
+  /** Tool result message(s): header line + expandable blockquote with real output. */
+  private toolResultParts(ok: boolean, name: string, dur: string, output: string): string[] {
     const mark = ok ? "✓" : "✗"
     const n = singleLine(name, 40)
-    const d = singleLine(detail, 150)
     if (!this.htmlOn()) {
-      return `${mark} ${n}${dur ? ` · ${dur}` : ""}${d ? ` · ${d}` : ""}`
+      const d = singleLine(output, 300)
+      return [`${mark} ${n}${dur ? ` · ${dur}` : ""}${d ? ` · ${d}` : ""}`]
     }
     const head = `${mark} <code>${esc(n)}</code>${dur ? ` · ${dur}` : ""}`
-    return d ? `${head} · ${esc(d)}` : head
+    if (!output) return [head]
+    const clipped =
+      output.length > this.opts.toolOutputChars
+        ? `${output.slice(0, Math.max(this.opts.toolOutputChars - 1, 1))}…`
+        : output
+    return splitHtml(`${head}\n<blockquote expandable>${esc(clipped)}</blockquote>`)
   }
 
-  private contentSnippet(content: unknown): string {
+  private outputText(content: unknown): string {
     if (!Array.isArray(content)) return ""
     return content
       .map((c) => {
@@ -319,7 +334,7 @@ export class Renderer {
         return item?.type === "text" ? (item.text ?? "") : ""
       })
       .filter(Boolean)
-      .join(" ")
+      .join("\n")
   }
 
   // =====================================================================
@@ -352,6 +367,66 @@ export class Renderer {
     } catch (err) {
       const message = String(err)
       if (!message.includes("message is not modified")) tlog(`block edit error: ${message}`)
+    }
+  }
+
+  // -------------------- reasoning streaming (chunked blockquote) --------------------
+  private reasoningHtml(r: ReasoningState): string {
+    if (!r.buf) return "🧠"
+    return this.htmlOn()
+      ? `🧠\n<blockquote expandable>${esc(r.buf)}</blockquote>`
+      : `🧠\n${r.buf}`
+  }
+
+  private async maybeFlushReasoning(state: TurnState, r: ReasoningState): Promise<void> {
+    if (this.disposed) return
+    const now = Date.now()
+    if (now - r.lastEdit >= this.opts.throttleMs) {
+      await this.flushReasoning(state, r)
+      return
+    }
+    if (!r.timer) {
+      r.timer = setTimeout(() => {
+        r.timer = undefined
+        void this.flushReasoning(state, r).catch(() => {})
+      }, this.opts.throttleMs - (now - r.lastEdit))
+    }
+  }
+
+  private async flushReasoning(state: TurnState, r: ReasoningState): Promise<void> {
+    if (this.disposed) return
+    r.lastEdit = Date.now()
+    const full = this.reasoningHtml(r)
+    const parts = this.htmlOn() ? splitHtml(full) : [full.length > 4000 ? `${full.slice(0, 3999)}…` : full]
+    const html = this.htmlOn()
+    const grown = parts.length > r.partsLen
+    try {
+      // no content yet -> keep just the "🧠" line, don't touch further
+      if (!r.buf && r.msgIDs.length === 1 && r.partsLen === 0) {
+        r.partsLen = 1
+        return
+      }
+      while (r.msgIDs.length < parts.length) {
+        const idx = r.msgIDs.length
+        const m = await this.send(state, parts[idx] ?? "", { html, silent: true })
+        const id = (m as { message_id?: number })?.message_id
+        if (id === undefined) break
+        r.msgIDs.push(id)
+      }
+      if (grown || parts.length === 1) {
+        for (let i = 0; i < r.msgIDs.length && i < parts.length; i++) {
+          await this.editActivity(state, r.msgIDs[i] as number, parts[i] as string)
+        }
+      } else {
+        const last = r.msgIDs.length - 1
+        const id = r.msgIDs[last]
+        if (id !== undefined && parts[last] !== undefined) {
+          await this.editActivity(state, id, parts[last] as string)
+        }
+      }
+      r.partsLen = parts.length
+    } catch (err) {
+      tlog(`reasoning flush error: ${String(err)}`)
     }
   }
 
@@ -423,7 +498,16 @@ export class Renderer {
   }
 
   // -------------------- terminal --------------------
-  private async finish(state: TurnState, marker: string | undefined): Promise<void> {
+  /** Remember the user's prompt message so the outcome can be reacted onto it. */
+  notePromptMessage(chatId: number, messageID: number): void {
+    this.lastPrompt.set(String(chatId), messageID)
+  }
+
+  private async finish(
+    state: TurnState,
+    marker: string | undefined,
+    outcome: "ok" | "fail" | "interrupt",
+  ): Promise<void> {
     if (state.finalized) return
     state.finalized = true
     if (state.typingTimer) {
@@ -453,6 +537,14 @@ export class Renderer {
     } else if (state.blocks === 0) {
       await this.send(state, "✅", { silent: false })
     }
+
+    // outcome reaction on the user's prompt message
+    const promptID = this.lastPrompt.get(state.chatId)
+    if (promptID !== undefined && outcome !== "interrupt") {
+      void this.bot
+        .setMessageReaction(Number(state.chatId), promptID, outcome === "ok" ? "✅" : "❌")
+        .catch(() => {})
+    }
   }
 
   dispose(): void {
@@ -474,9 +566,12 @@ interface ToolCall {
 }
 
 interface ReasoningState {
-  msgID?: number
+  /** chunk message ids (long thoughts split at 4096 with tags closed at seams) */
+  msgIDs: number[]
+  partsLen: number
   buf: string
   lastEdit: number
+  timer?: ReturnType<typeof setTimeout>
 }
 
 /** One Telegram message (chunked if >4096) per assistant-message text block. */

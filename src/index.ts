@@ -45,6 +45,8 @@ export default Plugin.define({
     const formatting: "html" | "plain" = ctx.options.formatting === "plain" ? "plain" : "html"
     const typingOn = ctx.options.typing !== false
     const stopButtonOn = ctx.options.stopButton !== false
+    const toolOutputChars =
+      typeof ctx.options.toolOutputChars === "number" ? ctx.options.toolOutputChars : 3000
 
     // default model for NEW sessions (else opencode's default — may be plan-gated)
     const modelOpt = typeof ctx.options.model === "string" ? ctx.options.model : ""
@@ -78,6 +80,7 @@ export default Plugin.define({
           formatting,
           typing: typingOn,
           stopButton: stopButtonOn,
+          toolOutputChars,
         })
         tlog(
           `telegram holder active (offset=${lease.offset}, delivery=${delivery}, ` +
@@ -85,12 +88,32 @@ export default Plugin.define({
             `formatting=${formatting}, allowFrom=${JSON.stringify(allowFrom)})`,
         )
 
+        // command menu + profile texts (pure API, no BotFather needed)
+        void bot
+          ?.setMyCommands([
+            { command: "new", description: "Start a fresh session" },
+            { command: "status", description: "Current session info" },
+            { command: "stop", description: "Interrupt the running turn" },
+            { command: "compact", description: "Compact conversation context" },
+            { command: "agent", description: "List or switch agents" },
+            { command: "model", description: "Show or switch the model" },
+            { command: "history", description: "Show recent messages" },
+            { command: "help", description: "Show all commands" },
+            { command: "start", description: "Introduction" },
+          ])
+          .catch((err) => tlog(`setMyCommands failed: ${String(err)}`))
+        void bot
+          ?.setMyDescription("OpenCode on Telegram — drive a local OpenCode agent from a DM.")
+          .catch(() => {})
+        void bot?.setMyShortDescription("OpenCode bridge").catch(() => {})
+
         const onMessage = async (msg: TelegramMessage): Promise<void> => {
           try {
             const text = msg.text ?? ""
             if (text.startsWith("/")) {
               await dispatch({ ctx, bot: bot as TelegramBot, chatId: msg.chat.id, text, sessions })
             } else {
+              renderer?.notePromptMessage(msg.chat.id, msg.message_id)
               const sid = await sessions.prompt(msg.chat.id, text)
               tlog(`prompt → session ${sid}`)
             }
