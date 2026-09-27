@@ -3,6 +3,10 @@
   "version": "0.1.0",
   "description": "Drive OpenCode from Telegram — a v2 plugin that bridges a bot DM to OpenCode sessions.",
   "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./server": "./src/index.ts"
+  },
   "license": "MIT",
   "author": "jaygupta17",
   "repository": {
