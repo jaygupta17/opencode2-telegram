@@ -26,8 +26,6 @@
 - **The whole command surface** — `/model` `/thinking` `/agent` pickers, `/undo` (revert last turn's file changes, with confirm), `/compact`, `/init`, `/sessions`, plus **your own command files become Telegram commands automatically**.
 - **Zero ports, zero extra RAM** — runs in-process inside OpenCode, DM-only with a chat-ID allowlist, outbound long-polling only.
 
-> 📹 **Demo:** _recording coming with the launch post — phone screen: prompt → streaming draft → tool blocks → permission card → status line._
-
 ## Install (60 seconds)
 
 ```sh
