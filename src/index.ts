@@ -50,6 +50,7 @@ export default Plugin.define({
     const toolOutputChars =
       typeof ctx.options.toolOutputChars === "number" ? ctx.options.toolOutputChars : 3000
     const autoImages = ctx.options.autoImages !== false
+    const streaming: "drafts" | "edits" = ctx.options.streaming === "edits" ? "edits" : "drafts"
 
     // default model for NEW sessions (else opencode's default — may be plan-gated)
     const modelOpt = typeof ctx.options.model === "string" ? ctx.options.model : ""
@@ -85,6 +86,7 @@ export default Plugin.define({
           stopButton: stopButtonOn,
           toolOutputChars,
           autoImages,
+          streaming,
         })
         tlog(
           `telegram holder active (offset=${lease.offset}, delivery=${delivery}, ` +
@@ -217,6 +219,17 @@ export default Plugin.define({
           }
         }
 
+        const onStopped = async (s: { chatId: number; draftID: number }): Promise<void> => {
+          try {
+            const sid = await sessions.current(s.chatId)
+            if (!sid) return
+            await ctx.session.interrupt({ sessionID: sid })
+            tlog(`stop via draft button (session ${sid})`)
+          } catch (err) {
+            tlog(`onStopped error: ${String(err)}`)
+          }
+        }
+
         void runPollLoop({
           bot: bot as TelegramBot,
           cfg,
@@ -224,6 +237,7 @@ export default Plugin.define({
           signal: ac.signal,
           onMessage,
           onCallback,
+          onStopped,
         }).catch((err) => tlog(`poll loop crashed: ${String(err)}`))
       }
     }

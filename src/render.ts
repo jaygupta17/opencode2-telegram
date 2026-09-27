@@ -24,6 +24,8 @@ export interface RendererOptions {
   toolOutputChars: number
   /** auto-send local images referenced in the final answer */
   autoImages: boolean
+  /** text streaming transport: native drafts or live message edits */
+  streaming: "drafts" | "edits"
 }
 
 /**
@@ -119,15 +121,22 @@ export class Renderer {
         finalized: false,
       }
       this.turns.set(sessionID, state)
-      if (this.opts.typing) {
-        void this.bot.sendChatAction(Number(chatId), "typing").catch(() => {})
-        state.typingTimer = setInterval(() => {
+      if (this.opts.streaming === "drafts") {
+        state.draftID = (Date.now() % 2_000_000_000) + 1
+        void this.bot
+          .sendMessageDraft(Number(chatId), state.draftID, "", { canStop: this.opts.stopButton })
+          .catch((err: unknown) => tlog(`draft placeholder failed: ${String(err)}`))
+      } else {
+        if (this.opts.typing) {
           void this.bot.sendChatAction(Number(chatId), "typing").catch(() => {})
-        }, 5000)
+          state.typingTimer = setInterval(() => {
+            void this.bot.sendChatAction(Number(chatId), "typing").catch(() => {})
+          }, 5000)
+        }
+        await this.send(state, "…", { stopButton: this.opts.stopButton }).then((m) => {
+          state.placeholderID = (m as { message_id?: number })?.message_id
+        })
       }
-      await this.send(state, "…", { stopButton: this.opts.stopButton }).then((m) => {
-        state.placeholderID = (m as { message_id?: number })?.message_id
-      })
       return
     }
 
@@ -176,6 +185,14 @@ export class Renderer {
   // =====================================================================
   private async reduce(state: TurnState, ev: V2Event): Promise<void> {
     const data = ev.data as Record<string, unknown> & { sessionID: string }
+
+    // drafts mode: an open text block logically ends when a different block kind starts
+    if (
+      this.opts.streaming === "drafts" &&
+      (ev.type.startsWith("session.tool.") || ev.type === "session.reasoning.started")
+    ) {
+      await this.closeOpenTexts(state)
+    }
 
     switch (ev.type) {
       // -------------------- thinking blocks (expandable blockquote) --------------------
@@ -282,6 +299,7 @@ export class Renderer {
       // -------------------- text blocks --------------------
       case "session.text.started": {
         if (state.finalized) return
+        await this.closeOpenTexts(state, msgKey(data))
         const block = this.ensureText(state, msgKey(data))
         block.parts.set(Number(data.ordinal), "")
         return
@@ -469,7 +487,7 @@ export class Renderer {
 
   // -------------------- text block streaming --------------------
   private async maybeFlushText(state: TurnState, key: string, block: TextBlock): Promise<void> {
-    if (this.disposed) return
+    if (this.disposed || block.finalized) return
     const raw = this.textRaw(block)
     if (!raw) return
     const now = Date.now()
@@ -486,7 +504,11 @@ export class Renderer {
   }
 
   private async flushText(state: TurnState, key: string, block: TextBlock): Promise<void> {
-    if (this.disposed || !block) return
+    if (this.disposed || !block || block.finalized) return
+    if (this.opts.streaming === "drafts") {
+      await this.flushDraft(state, block)
+      return
+    }
     block.lastEdit = Date.now()
     const raw = this.textRaw(block)
     if (!raw) return
@@ -534,6 +556,51 @@ export class Renderer {
     }
   }
 
+  // -------------------- drafts mode --------------------
+  private async flushDraft(state: TurnState, block: TextBlock): Promise<void> {
+    if (state.draftID === undefined) return
+    block.lastEdit = Date.now()
+    const raw = this.textRaw(block)
+    if (!raw) return
+    const html = this.htmlOn()
+    // first split part is guaranteed well-formed (tags closed) for HTML mode
+    const preview = html ? (splitHtml(mdToHtml(raw))[0] ?? "") : raw.slice(0, 4096)
+    await this.bot
+      .sendMessageDraft(Number(state.chatId), state.draftID, preview, {
+        html,
+        canStop: this.opts.stopButton,
+      })
+      .catch((err: unknown) => tlog(`draft error: ${String(err)}`))
+  }
+
+  /** Land a drafted text block as real, frozen message(s). */
+  private async finalizeTextBlock(state: TurnState, block: TextBlock): Promise<void> {
+    if (block.finalized) return
+    block.finalized = true
+    if (block.timer) {
+      clearTimeout(block.timer)
+      block.timer = undefined
+    }
+    const raw = this.textRaw(block)
+    if (!raw) return
+    const html = this.htmlOn()
+    const parts = html
+      ? splitHtml(mdToHtml(raw))
+      : [raw.length > 4000 ? `${raw.slice(0, 3999)}…` : raw]
+    for (const part of parts) {
+      await this.send(state, part, { html, silent: true })
+    }
+    state.blocks++
+  }
+
+  private async closeOpenTexts(state: TurnState, exceptKey?: string): Promise<void> {
+    if (this.opts.streaming !== "drafts") return
+    for (const [key, block] of state.texts.entries()) {
+      if (key === exceptKey || block.finalized) continue
+      await this.finalizeTextBlock(state, block)
+    }
+  }
+
   // -------------------- terminal --------------------
   /** Remember the user's prompt message so the outcome can be reacted onto it. */
   notePromptMessage(chatId: number, messageID: number): void {
@@ -552,13 +619,17 @@ export class Renderer {
       state.typingTimer = undefined
     }
 
-    // final flush of any still-open text blocks (their own last edit)
-    for (const [key, block] of state.texts.entries()) {
-      if (block.timer) {
-        clearTimeout(block.timer)
-        block.timer = undefined
+    // close/finalize text blocks
+    if (this.opts.streaming === "drafts") {
+      await this.closeOpenTexts(state)
+    } else {
+      for (const [key, block] of state.texts.entries()) {
+        if (block.timer) {
+          clearTimeout(block.timer)
+          block.timer = undefined
+        }
+        await this.flushText(state, key, block)
       }
-      await this.flushText(state, key, block)
     }
 
     // status widget: deleted, never morphed
@@ -652,11 +723,15 @@ interface TextBlock {
   partsLen: number
   lastEdit: number
   timer?: ReturnType<typeof setTimeout>
+  /** drafts mode: block already landed as real message(s) */
+  finalized?: boolean
 }
 
 interface TurnState {
   chatId: string
   placeholderID?: number
+  /** drafts mode: animated preview id (same id per turn) */
+  draftID?: number
   reasoning: Map<string, ReasoningState>
   tools: Map<string, ToolCall>
   texts: Map<string, TextBlock>

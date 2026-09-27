@@ -23,6 +23,11 @@ export interface TelegramUpdate {
   update_id: number
   message?: TelegramMessage
   callback_query?: TelegramCallbackQuery
+  stopped_message_generation?: {
+    chat: { id: number; type: string }
+    message_thread_id?: number
+    draft_id: number
+  }
 }
 
 export interface TelegramConfig {
@@ -82,9 +87,29 @@ export class TelegramBot {
   getUpdates(offset: number, signal?: AbortSignal): Promise<TelegramUpdate[]> {
     return this.call(
       "getUpdates",
-      { offset, timeout: this.cfg.pollTimeoutSec, allowed_updates: ["message", "callback_query"] },
+      {
+        offset,
+        timeout: this.cfg.pollTimeoutSec,
+        allowed_updates: ["message", "callback_query", "stopped_message_generation"],
+      },
       signal,
     )
+  }
+
+  /** Stream a formatted preview draft (same draft_id animates; empty text = "Thinking…"). */
+  sendMessageDraft(
+    chatId: number,
+    draftID: number,
+    text: string,
+    opts?: { html?: boolean; canStop?: boolean },
+  ): Promise<unknown> {
+    return this.call("sendMessageDraft", {
+      chat_id: chatId,
+      draft_id: draftID,
+      text: text.slice(0, 4096),
+      ...(opts?.html ? { parse_mode: "HTML" } : {}),
+      ...(opts?.canStop ? { can_stop: true } : {}),
+    })
   }
 
   private baseBody(chatId: number, text: string, opts: SendOpts): Record<string, unknown> {

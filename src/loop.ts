@@ -129,8 +129,16 @@ async function route(
       messageID?: number
       cardText?: string
     }) => Promise<void>
+    onStopped: (s: { chatId: number; draftID: number }) => Promise<void>
   },
 ): Promise<void> {
+  const stopped = update.stopped_message_generation
+  if (stopped) {
+    const chatId = String(stopped.chat.id)
+    if (!cfg.allowFrom.includes(chatId)) return
+    await handlers.onStopped({ chatId: Number(chatId), draftID: stopped.draft_id })
+    return
+  }
   const cb = update.callback_query
   if (cb) {
     const chatId = String(cb.message?.chat?.id ?? cb.from.id)
@@ -186,8 +194,9 @@ export async function runPollLoop(opts: {
     messageID?: number
     cardText?: string
   }) => Promise<void>
+  onStopped: (s: { chatId: number; draftID: number }) => Promise<void>
 }): Promise<void> {
-  const { bot, cfg, lease, signal, onMessage, onCallback } = opts
+  const { bot, cfg, lease, signal, onMessage, onCallback, onStopped } = opts
   let backoffMs = 2_000
   let offset = lease.offset
 
@@ -199,7 +208,7 @@ export async function runPollLoop(opts: {
         offset = update.update_id + 1
         lease.setOffset(offset)
         try {
-          await route(bot, cfg, update, { onMessage, onCallback })
+          await route(bot, cfg, update, { onMessage, onCallback, onStopped })
         } catch (err) {
           tlog(`route error: ${String(err)}`)
         }
