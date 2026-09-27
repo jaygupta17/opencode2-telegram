@@ -7,16 +7,18 @@ type Delivery = "steer" | "queue"
 
 /**
  * Chat <-> session mapping, persisted in plugin storage.
- *   map:chat:<chatId>  -> sessionID
- *   map:session:<sid>  -> chatId   (renderer's event -> chat lookup)
- * An in-memory cache avoids a storage read per streamed delta; entries are
- * written on mapping creation, so every unmapped session is cached as null
- * after its first event.
+ *   chats              -> [chatId, ...] every chat this bot ever served
+ *   map:chat:<chatId>  -> sessionID (the chat's CURRENT session)
+ *
+ * Render scope rule: an event is rendered to a chat only when it belongs to
+ * the session that chat CURRENTLY points at. Sessions are never permanently
+ * glued to a chat — switching (picker, /new) instantly re-scopes rendering,
+ * and foreign sessions (TUI work, other processes) never leak into Telegram.
  */
 export class Sessions {
-  private readonly cache = new Map<string, string | null>()
-  /** pending permission request id -> session id (callback routing) */
-  private readonly requests = new Map<string, string>()
+  /** chatId -> sessionID | null (null = looked up, nothing valid there) */
+  private readonly currentCache = new Map<string, string | null>()
+  private chats: string[] | null = null
 
   constructor(
     private readonly ctx: Context,
@@ -24,27 +26,47 @@ export class Sessions {
     private readonly defaultModel?: { providerID: string; id: string; variant?: string },
   ) {}
 
-  async chatFor(sessionID: string): Promise<string | undefined> {
-    if (this.cache.has(sessionID)) return this.cache.get(sessionID) ?? undefined
-    const chatId = ((await this.ctx.storage.get(`map:session:${sessionID}`)) as string | undefined) ?? null
-    this.cache.set(sessionID, chatId)
-    return chatId ?? undefined
+  // ---- chat registry ----
+  private async chatList(): Promise<string[]> {
+    if (this.chats) return this.chats
+    this.chats = ((await this.ctx.storage.get("chats")) as string[] | undefined) ?? []
+    return this.chats
   }
 
-  remember(sessionID: string, chatId: string): void {
-    this.cache.set(sessionID, chatId)
+  private async registerChat(chatId: number): Promise<void> {
+    const list = await this.chatList()
+    const id = String(chatId)
+    if (list.includes(id)) return
+    list.push(id)
+    this.chats = list
+    await this.ctx.storage.set("chats", list)
+    tlog(`chat ${id} registered (${list.length} total)`)
+  }
+
+  /** The chat whose CURRENT session is `sessionID` — or undefined. */
+  async chatFor(sessionID: string): Promise<string | undefined> {
+    for (const id of await this.chatList()) {
+      if ((await this.current(Number(id))) === sessionID) return id
+    }
+    return undefined
   }
 
   async current(chatId: number): Promise<string | undefined> {
-    const sid = (await this.ctx.storage.get(`map:chat:${chatId}`)) as string | undefined
-    if (!sid) return undefined
+    const key = String(chatId)
+    if (this.currentCache.has(key)) return this.currentCache.get(key) ?? undefined
+    const sid = ((await this.ctx.storage.get(`map:chat:${key}`)) as string | undefined) ?? null
+    if (!sid) {
+      this.currentCache.set(key, null)
+      return undefined
+    }
     try {
       await this.ctx.session.get({ sessionID: sid })
+      this.currentCache.set(key, sid)
       return sid
     } catch {
       tlog(`stored session ${sid} gone — dropping mapping`)
-      await this.ctx.storage.remove(`map:chat:${chatId}`)
-      await this.ctx.storage.remove(`map:session:${sid}`)
+      await this.ctx.storage.remove(`map:chat:${key}`)
+      this.currentCache.set(key, null)
       return undefined
     }
   }
@@ -56,8 +78,8 @@ export class Sessions {
     })
     const sid = info.id
     await this.ctx.storage.set(`map:chat:${chatId}`, sid)
-    await this.ctx.storage.set(`map:session:${sid}`, String(chatId))
-    this.remember(sid, String(chatId))
+    this.currentCache.set(String(chatId), sid)
+    await this.registerChat(chatId)
     tlog(`created session ${sid} for chat ${chatId}`)
     return sid
   }
@@ -70,8 +92,8 @@ export class Sessions {
   /** Switch the chat's active session (session picker). */
   async setCurrent(chatId: number, sessionID: string): Promise<void> {
     await this.ctx.storage.set(`map:chat:${chatId}`, sessionID)
-    await this.ctx.storage.set(`map:session:${sessionID}`, String(chatId))
-    this.remember(sessionID, String(chatId))
+    this.currentCache.set(String(chatId), sessionID)
+    await this.registerChat(chatId)
   }
 
   /** Route user text into the session (delivery controls busy behavior). */
@@ -90,7 +112,9 @@ export class Sessions {
     return sessionID
   }
 
-  // ---- permission request routing ----
+  // ---- permission request routing (in-memory; requests are short-lived) ----
+  private readonly requests = new Map<string, string>()
+
   rememberRequest(requestID: string, sessionID: string): void {
     this.requests.set(requestID, sessionID)
   }

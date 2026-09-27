@@ -82,6 +82,7 @@ export default Plugin.define({
     const bot = token ? new TelegramBot(cfg) : undefined
 
     let lease: Lease | undefined
+    let leaseRetry: ReturnType<typeof setInterval> | undefined
     let renderer: Renderer | undefined
     let refreshTimer: ReturnType<typeof setTimeout> | undefined
     let scheduleRegistryRefresh: (() => void) | undefined
@@ -90,11 +91,12 @@ export default Plugin.define({
     if (!token) {
       tlog("no token configured — Telegram idle (set options.token or TELEGRAM_BOT_TOKEN)")
     } else {
-      lease = acquireLease()
-      if (!lease.held) {
-        tlog("loop owned by another opencode process (pid lease busy) — standing down")
-        lease = undefined
-      } else {
+      const startBot = async (): Promise<void> => {
+        const l: Lease | undefined = lease
+        if (!l?.held) return
+        l.setPersister((o) => {
+          void ctx.storage.set("tg:offset", o).catch(() => {})
+        })
         // stats provider: session info + per-model context limits
         const modelLimits = new Map<string, number>()
         let limitsLoaded = false
@@ -177,7 +179,7 @@ export default Plugin.define({
           getStats,
         })
         tlog(
-          `telegram holder active (offset=${lease.offset}, delivery=${delivery}, ` +
+          `telegram holder active (offset=${l.offset}, delivery=${delivery}, ` +
             `activity=${activityOn ? "per-action" : "off"}, reasoning=${showReasoning}, ` +
             `formatting=${formatting}, allowFrom=${JSON.stringify(allowFrom)})`,
         )
@@ -216,6 +218,8 @@ export default Plugin.define({
           ?.setMyDescription("OpenCode on Telegram — drive a local OpenCode agent from a DM.")
           .catch(() => {})
         void bot?.setMyShortDescription("OpenCode bridge").catch(() => {})
+        // cards for questions that went pending while we were down
+        void renderer.catchUpForms().catch((err: unknown) => tlog(String(err)))
 
         const onMessage = async (msg: TelegramMessage): Promise<void> => {
           try {
@@ -261,6 +265,17 @@ export default Plugin.define({
                 undoStash,
               })
             } else {
+              // a pending custom answer (✍️) swallows the next plain message
+              const consumed = await renderer
+                ?.consumeCustomInput(msg.chat.id, text)
+                .catch((err: unknown) => {
+                  tlog(`custom input handling failed: ${String(err)}`)
+                  return false
+                })
+              if (consumed) {
+                tlog(`custom form answer from chat ${msg.chat.id}`)
+                return
+              }
               renderer?.notePromptMessage(msg.chat.id, msg.message_id)
               const sid = await sessions.prompt(msg.chat.id, text)
               tlog(`prompt → session ${sid}`)
@@ -479,6 +494,16 @@ export default Plugin.define({
               }
               return
             }
+            if (cb.data.startsWith("q:")) {
+              const feedback = await renderer
+                ?.onFormCallback(cb.data.slice(2))
+                .catch((err: unknown) => {
+                  tlog(`form callback failed: ${String(err)}`)
+                  return "⚠️ failed"
+                })
+              await bot?.answerCallbackQuery(cb.callbackID, feedback || undefined)
+              return
+            }
             if (cb.data === "stop") {
               const sid = await sessions.current(cb.chatId)
               if (!sid) {
@@ -511,12 +536,36 @@ export default Plugin.define({
         void runPollLoop({
           bot: bot as TelegramBot,
           cfg,
-          lease,
+          lease: l,
           signal: ac.signal,
           onMessage,
           onCallback,
           onStopped,
         }).catch((err) => tlog(`poll loop crashed: ${String(err)}`))
+      }
+
+      lease = acquireLease(
+        ((await ctx.storage.get("tg:offset")) as number | undefined) ?? 0,
+      )
+      if (lease.held) {
+        void startBot()
+      } else {
+        tlog("loop owned by another opencode process (pid lease busy) — retrying every 30s until the holder dies")
+        const storedOffset = ((await ctx.storage.get("tg:offset")) as number | undefined) ?? 0
+        const retry: ReturnType<typeof setInterval> = setInterval(() => {
+          if (ac.signal.aborted) {
+            clearInterval(retry)
+            return
+          }
+          const again = acquireLease(storedOffset)
+          if (!again.held) return
+          tlog("lease acquired on retry — starting telegram loop")
+          clearInterval(retry)
+          lease = again
+          void startBot()
+        }, 30_000)
+        retry.unref?.()
+        leaseRetry = retry
       }
     }
 
@@ -552,6 +601,7 @@ export default Plugin.define({
 
     return () => {
       if (refreshTimer) clearTimeout(refreshTimer)
+      if (leaseRetry) clearInterval(leaseRetry)
       renderer?.dispose()
       lease?.release()
       ac.abort()

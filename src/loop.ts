@@ -48,13 +48,16 @@ export interface Lease {
   held: boolean
   offset: number
   setOffset: (offset: number) => void
+  /** persist offset outside the lease file (plugin storage) — survives reloads */
+  setPersister: (fn: (offset: number) => void) => void
   release: () => void
 }
 
-export function acquireLease(): Lease {
+export function acquireLease(initialOffset = 0): Lease {
   mkdirSync(LEASE_DIR, { recursive: true })
   const me = process.pid
-  let offset = 0
+  let offset = initialOffset
+  let persister: ((offset: number) => void) | undefined
 
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
@@ -66,10 +69,16 @@ export function acquireLease(): Lease {
       if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err
       const prev = readLease()
       if (prev && pidAlive(prev.pid) && Date.now() - prev.at < STALE_MS) {
-        return { held: false, offset: prev.offset, setOffset: () => {}, release: () => {} }
+        return {
+          held: false,
+          offset: prev.offset,
+          setOffset: () => {},
+          setPersister: () => {},
+          release: () => {},
+        }
       }
       // dead pid or stale heartbeat (or unreadable) — steal it
-      offset = prev?.offset ?? 0
+      offset = Math.max(prev?.offset ?? 0, initialOffset)
       try {
         unlinkSync(LEASE_FILE)
       } catch {
@@ -77,7 +86,13 @@ export function acquireLease(): Lease {
       }
     }
   }
-  return { held: false, offset: 0, setOffset: () => {}, release: () => {} }
+  return {
+    held: false,
+    offset: 0,
+    setOffset: () => {},
+    setPersister: () => {},
+    release: () => {},
+  }
 
   function makeHeld(): Lease {
     let offsetNow = offset
@@ -89,7 +104,7 @@ export function acquireLease(): Lease {
       }
     }, HEARTBEAT_MS)
     beat.unref?.()
-    return {
+    const leaseObj: Lease = {
       held: true,
       get offset() {
         return offsetNow
@@ -101,6 +116,14 @@ export function acquireLease(): Lease {
         } catch {
           /* best effort */
         }
+        try {
+          persister?.(next)
+        } catch {
+          /* best effort */
+        }
+      },
+      setPersister(fn: (offset: number) => void) {
+        persister = fn
       },
       release() {
         clearInterval(beat)
@@ -112,6 +135,27 @@ export function acquireLease(): Lease {
         }
       },
     }
+    return leaseObj
+  }
+}
+
+/**
+ * Ownership re-check for a RUNNING poll loop: another live process took the
+ * lease (hot-reload, newer TUI) -> we must stop polling or Telegram 409s.
+ */
+export function leaseOwnership(): "mine" | "other" | "free" {
+  const cur = readLease()
+  if (!cur) return "free"
+  if (cur.pid === process.pid) return "mine"
+  return pidAlive(cur.pid) ? "other" : "free"
+}
+
+/** Re-assert a free lease file (previous holder died while we were polling). */
+export function reassertLease(offset: number): void {
+  try {
+    writeLease({ pid: process.pid, at: Date.now(), offset })
+  } catch {
+    /* best effort */
   }
 }
 
@@ -199,8 +243,20 @@ export async function runPollLoop(opts: {
   const { bot, cfg, lease, signal, onMessage, onCallback, onStopped } = opts
   let backoffMs = 2_000
   let offset = lease.offset
+  let lastOwnedCheck = 0
 
   while (!signal.aborted) {
+    // yield if another live process took the lease (hot-reload / newer TUI)
+    if (Date.now() - lastOwnedCheck > 15_000) {
+      lastOwnedCheck = Date.now()
+      const owned = leaseOwnership()
+      if (owned === "other") {
+        tlog("lease taken by another live process — standing down")
+        lease.release()
+        return
+      }
+      if (owned === "free") reassertLease(offset)
+    }
     try {
       const updates = await bot.getUpdates(offset, signal)
       backoffMs = 2_000
@@ -215,7 +271,16 @@ export async function runPollLoop(opts: {
       }
     } catch (err) {
       if (signal.aborted) break
-      tlog(`poll error (retry in ${backoffMs}ms): ${String(err)}`)
+      const message = String(err)
+      // 409 = another getUpdates poller — re-check ownership right away
+      if (message.includes("Conflict")) {
+        if (leaseOwnership() === "other") {
+          tlog("poll conflict + lease lost — standing down")
+          lease.release()
+          return
+        }
+      }
+      tlog(`poll error (retry in ${backoffMs}ms): ${message}`)
       await new Promise((resolve) => {
         const t = setTimeout(resolve, backoffMs)
         signal.addEventListener("abort", () => clearTimeout(t), { once: true })

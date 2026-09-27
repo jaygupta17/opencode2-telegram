@@ -7,11 +7,12 @@ import { fileURLToPath } from "node:url"
  * module's location — works from any process that loads the plugin).
  */
 const PROOF = fileURLToPath(new URL("../.tg-proof", import.meta.url))
+const ME = `pid${process.pid}`
 
 export const tlog = (line: string): void => {
-  console.log(`[tg] ${line}`)
+  console.log(`[tg ${ME}] ${line}`)
   try {
-    appendFileSync(PROOF, `${new Date().toISOString()} [tg] ${line}\n`)
+    appendFileSync(PROOF, `${new Date().toISOString()} [tg ${ME}] ${line}\n`)
   } catch {
     /* proof file is best-effort */
   }
