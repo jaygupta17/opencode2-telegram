@@ -6,7 +6,9 @@ import { acquireLease, runPollLoop, type Lease } from "./loop.js"
 import { TelegramBot, type TelegramConfig, type TelegramMessage } from "./bot.js"
 import { Sessions } from "./sessions.js"
 import { Renderer } from "./render.js"
-import { dispatch } from "./commands.js"
+import { dispatch, type UndoStashEntry } from "./commands.js"
+import { buildRegistry, syncMenu } from "./builtins.js"
+import { apiCall, configureLocalApi } from "./local-api.js"
 
 /**
  * opencode-telegram — drive OpenCode from a Telegram DM.
@@ -67,6 +69,8 @@ export default Plugin.define({
 
     let lease: Lease | undefined
     let renderer: Renderer | undefined
+    let refreshTimer: ReturnType<typeof setTimeout> | undefined
+    let scheduleRegistryRefresh: (() => void) | undefined
 
     if (!token) {
       tlog("no token configured — Telegram idle (set options.token or TELEGRAM_BOT_TOKEN)")
@@ -94,21 +98,38 @@ export default Plugin.define({
             `formatting=${formatting}, allowFrom=${JSON.stringify(allowFrom)})`,
         )
 
-        // command menu + profile texts (pure API, no BotFather needed)
-        void bot
-          ?.setMyCommands([
-            { command: "new", description: "Start a fresh session" },
-            { command: "status", description: "Current session info" },
-            { command: "stop", description: "Interrupt the running turn" },
-            { command: "compact", description: "Compact conversation context" },
-            { command: "agent", description: "List or switch agents" },
-            { command: "model", description: "Show or switch the model" },
-            { command: "history", description: "Show recent messages" },
-            { command: "sendfile", description: "Send a local file to the chat" },
-            { command: "help", description: "Show all commands" },
-            { command: "start", description: "Introduction" },
-          ])
-          .catch((err) => tlog(`setMyCommands failed: ${String(err)}`))
+        // local API override + command registry + menu sync
+        configureLocalApi(
+          ctx.options.localApi as { port?: number; password?: string } | undefined,
+        )
+        const cmdOpts = (ctx.options.commands ?? {}) as {
+          builtins?: boolean
+          custom?: boolean
+          hidden?: string[]
+        }
+        const registryOpts = {
+          builtins: cmdOpts.builtins !== false,
+          custom: cmdOpts.custom !== false,
+          hidden: Array.isArray(cmdOpts.hidden) ? cmdOpts.hidden.map(String) : [],
+        }
+        let registry = await buildRegistry(ctx, registryOpts)
+        void syncMenu(bot as TelegramBot, registry).catch((err) =>
+          tlog(`menu sync failed: ${String(err)}`),
+        )
+        scheduleRegistryRefresh = () => {
+          if (refreshTimer) return
+          refreshTimer = setTimeout(() => {
+            refreshTimer = undefined
+            void buildRegistry(ctx, registryOpts)
+              .then((r) => {
+                registry = r
+                return syncMenu(bot as TelegramBot, r)
+              })
+              .catch((err) => tlog(`registry refresh failed: ${String(err)}`))
+          }, 2000)
+        }
+        const undoStash = new Map<string, UndoStashEntry>()
+
         void bot
           ?.setMyDescription("OpenCode on Telegram — drive a local OpenCode agent from a DM.")
           .catch(() => {})
@@ -148,7 +169,15 @@ export default Plugin.define({
             }
             const text = msg.text ?? ""
             if (text.startsWith("/")) {
-              await dispatch({ ctx, bot: bot as TelegramBot, chatId: msg.chat.id, text, sessions })
+              await dispatch({
+                ctx,
+                bot: bot as TelegramBot,
+                chatId: msg.chat.id,
+                text,
+                sessions,
+                registry,
+                undoStash,
+              })
             } else {
               renderer?.notePromptMessage(msg.chat.id, msg.message_id)
               const sid = await sessions.prompt(msg.chat.id, text)
@@ -168,6 +197,58 @@ export default Plugin.define({
           cardText?: string
         }): Promise<void> => {
           try {
+            if (cb.data === "undo:confirm" || cb.data === "undo:cancel") {
+              const stash = undoStash.get(String(cb.chatId))
+              if (!stash) {
+                await bot?.answerCallbackQuery(cb.callbackID, "expired")
+                return
+              }
+              try {
+                if (cb.data === "undo:confirm") {
+                  await apiCall("POST", `/api/session/${stash.sessionID}/revert/commit`)
+                  await bot?.answerCallbackQuery(cb.callbackID, "✅ undone")
+                } else {
+                  await apiCall("DELETE", `/api/session/${stash.sessionID}/revert`)
+                  await bot?.answerCallbackQuery(cb.callbackID, "cancelled")
+                }
+                undoStash.delete(String(cb.chatId))
+                if (cb.messageID !== undefined) {
+                  const card = cb.cardText ?? "undo"
+                  const mark = cb.data === "undo:confirm" ? "✅ undone" : "🚫 cancelled"
+                  await bot
+                    ?.editMessageText(cb.chatId, cb.messageID, `${card}\n\n${mark}`, {
+                      html: true,
+                      removeKeyboard: true,
+                    })
+                    .catch(() => {})
+                }
+              } catch (err) {
+                tlog(`undo callback failed: ${String(err)}`)
+                await bot?.answerCallbackQuery(cb.callbackID, "failed")
+              }
+              return
+            }
+            if (cb.data.startsWith("sess:")) {
+              const target = cb.data.slice(5)
+              try {
+                const info = await ctx.session.get({ sessionID: target })
+                await sessions.setCurrent(cb.chatId, target)
+                await bot?.answerCallbackQuery(cb.callbackID, "switched")
+                if (cb.messageID !== undefined) {
+                  await bot
+                    ?.editMessageText(
+                      cb.chatId,
+                      cb.messageID,
+                      `🗂 session: ${info.title ?? target}\n${target}`,
+                      { removeKeyboard: true },
+                    )
+                    .catch(() => {})
+                }
+              } catch {
+                await bot?.answerCallbackQuery(cb.callbackID, "session not found")
+              }
+              return
+            }
             if (cb.data.startsWith("perm:")) {
               const parts = cb.data.split(":")
               const reply = parts[1]
@@ -259,6 +340,9 @@ export default Plugin.define({
             } catch (err) {
               tlog(`render error: ${String(err)}`)
             }
+            if (event.type === "command.updated" && scheduleRegistryRefresh) {
+              scheduleRegistryRefresh()
+            }
           }
         }
       } catch (err) {
@@ -267,6 +351,7 @@ export default Plugin.define({
     })()
 
     return () => {
+      if (refreshTimer) clearTimeout(refreshTimer)
       renderer?.dispose()
       lease?.release()
       ac.abort()

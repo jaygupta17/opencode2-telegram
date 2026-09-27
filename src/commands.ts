@@ -1,21 +1,16 @@
 import type { Plugin } from "@opencode/plugin"
 import type { TelegramBot } from "./bot.js"
 import type { Sessions } from "./sessions.js"
+import type { Registry } from "./builtins.js"
+import { helpText } from "./builtins.js"
+import { apiCall } from "./local-api.js"
 import { tlog } from "./log.js"
 
 type Context = Plugin.Context
 
-const HELP = `opencode-telegram commands:
-/new       start a fresh session
-/status    current session info
-/stop      interrupt the running turn
-/compact   compact conversation context
-/agent     list agents · /agent <id> switches
-/model     current model · /model <provider>/<id> switches
-/history [n]  last messages (default 6)
-/sendfile <path>  send a local file to this chat
-/help      this message`
-
+export interface UndoStashEntry {
+  sessionID: string
+}
 
 export async function dispatch(input: {
   ctx: Context
@@ -23,8 +18,10 @@ export async function dispatch(input: {
   chatId: number
   text: string
   sessions: Sessions
+  registry: Registry
+  undoStash: Map<string, UndoStashEntry>
 }): Promise<void> {
-  const { ctx, bot, chatId, text, sessions } = input
+  const { ctx, bot, chatId, text, sessions, registry, undoStash } = input
   const [rawCmd, ...rest] = text.trim().split(/\s+/)
   const cmd = (rawCmd ?? "").slice(1).split("@")[0]?.toLowerCase() ?? ""
   const reply = (body: string) => bot.sendMessage(chatId, body)
@@ -33,7 +30,7 @@ export async function dispatch(input: {
     switch (cmd) {
       case "start":
       case "help":
-        await reply(HELP)
+        await reply(helpText(registry))
         return
 
       case "new": {
@@ -73,14 +70,101 @@ export async function dispatch(input: {
       }
 
       case "compact": {
+        const sid = await sessions.ensure(chatId)
+        try {
+          await apiCall("POST", `/api/session/${sid}/compact`, {})
+          await reply("🧹 compaction requested")
+        } catch (err) {
+          await reply(`⚠️ compact unavailable: ${String(err)}`)
+        }
+        return
+      }
+
+      case "init": {
+        const sid = await sessions.ensure(chatId)
+        try {
+          await ctx.session.command({ sessionID: sid, name: "init", text: "" })
+          await reply("🧭 init started — AGENTS.md flow running")
+        } catch (err) {
+          await reply(`⚠️ init failed: ${String(err)}`)
+        }
+        return
+      }
+
+      case "undo": {
         const sid = await sessions.current(chatId)
         if (!sid) {
           await reply("no active session")
           return
         }
-        // plugin domain exposes session.command, not session.compact
-        await ctx.session.command({ sessionID: sid, name: "compact", text: "" })
-        await reply("🧹 compaction queued")
+        try {
+          const messages = await ctx.session.context({ sessionID: sid })
+          const lastUser = [...messages].reverse().find((m) => m.type === "user")
+          if (!lastUser) {
+            await reply("nothing to undo")
+            return
+          }
+          const res = await apiCall<{
+            data?: { files?: Array<{ file: string; additions?: number; deletions?: number }> }
+          }>("POST", `/api/session/${sid}/revert/stage`, { messageID: lastUser.id })
+          const files = res?.data?.files ?? []
+          if (files.length === 0) {
+            await reply("nothing to undo (no file changes in the last turn)")
+            return
+          }
+          undoStash.set(String(chatId), { sessionID: sid })
+          const lines = files
+            .slice(0, 10)
+            .map(
+              (f) =>
+                `• ${f.file}${f.additions || f.deletions ? ` (+${f.additions ?? 0} −${f.deletions ?? 0})` : ""}`,
+            )
+          const keyboard = {
+            inline_keyboard: [
+              [
+                { text: "✅ Confirm undo", callback_data: "undo:confirm" },
+                { text: "🚫 Cancel", callback_data: "undo:cancel" },
+              ],
+            ],
+          }
+          await bot.sendMessage(chatId, `⏪ <b>Undo last turn?</b>\n${lines.join("\n")}`, {
+            html: true,
+            keyboard,
+          })
+        } catch (err) {
+          await reply(`⚠️ undo failed: ${String(err)}`)
+        }
+        return
+      }
+
+      case "sessions": {
+        try {
+          const res = await apiCall<{
+            data?: Array<{ id: string; title?: string; time?: { updated?: number } }>
+          }>("GET", "/api/session?limit=10&order=desc")
+          const rows = (res?.data ?? []).slice(0, 8)
+          if (rows.length === 0) {
+            await reply("no sessions")
+            return
+          }
+          const keyboard = {
+            inline_keyboard: rows.map((s) => [
+              {
+                text: `${(s.title ?? "(untitled)").slice(0, 40)} · ${s.id.slice(-6)}`,
+                callback_data: `sess:${s.id}`,
+              },
+            ]),
+          }
+          await bot.sendMessage(chatId, "🗂 pick a session:", { keyboard })
+        } catch (err) {
+          await reply(`⚠️ sessions unavailable: ${String(err)}`)
+        }
+        return
+      }
+
+      case "redo":
+      case "share": {
+        await reply(`/${cmd} is not available through the v2 plugin API`)
         return
       }
 
@@ -170,9 +254,18 @@ export async function dispatch(input: {
         return
       }
 
-      default:
-        await reply(`unknown command: ${rawCmd}\n\n${HELP}`)
+      default: {
+        const entry = registry.byTg.get(cmd)
+        if (entry && entry.kind === "custom") {
+          const sid = await sessions.ensure(chatId)
+          const args = rest.join(" ")
+          await ctx.session.command({ sessionID: sid, name: entry.oc, text: args })
+          tlog(`custom command /${cmd} → ${entry.oc} (session ${sid})`)
+          return
+        }
+        await reply(`unknown command: ${rawCmd}\n\n${helpText(registry)}`)
         return
+      }
     }
   } catch (err) {
     tlog(`command /${cmd} failed: ${String(err)}`)

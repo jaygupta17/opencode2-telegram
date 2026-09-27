@@ -67,6 +67,13 @@ export class Sessions {
     return (await this.current(chatId)) ?? (await this.create(chatId))
   }
 
+  /** Switch the chat's active session (session picker). */
+  async setCurrent(chatId: number, sessionID: string): Promise<void> {
+    await this.ctx.storage.set(`map:chat:${chatId}`, sessionID)
+    await this.ctx.storage.set(`map:session:${sessionID}`, String(chatId))
+    this.remember(sessionID, String(chatId))
+  }
+
   /** Route user text into the session (delivery controls busy behavior). */
   async prompt(
     chatId: number,
