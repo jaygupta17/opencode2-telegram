@@ -29,7 +29,7 @@ export interface RendererOptions {
   /** append a stats line (model/agent/cost/context) to the turn-end message */
   stats: boolean
   /** stats provider injected from the entry (session.get + model limits) */
-  getStats?: (sessionID: string) => Promise<StatsInfo | undefined>
+  getStats?: (sessionID: string, startedAt?: number) => Promise<StatsInfo | undefined>
 }
 
 export interface StatsInfo {
@@ -40,6 +40,8 @@ export interface StatsInfo {
   /** current context usage (tokens) */
   contextUsed?: number
   contextLimit?: number
+  /** output tokens produced this turn (for tok/s) */
+  turnOutput?: number
 }
 
 /**
@@ -128,6 +130,7 @@ export class Renderer {
       const state: TurnState = {
         sessionID,
         chatId,
+        startedAt: (ev as { created?: number }).created ?? Date.now(),
         reasoning: new Map(),
         tools: new Map(),
         texts: new Map(),
@@ -337,14 +340,17 @@ export class Renderer {
 
       // -------------------- terminal --------------------
       case "session.execution.succeeded": {
+        state.endedAt = (ev as { created?: number }).created ?? Date.now()
         await this.finish(state, undefined, "ok")
         return
       }
       case "session.execution.interrupted": {
+        state.endedAt = (ev as { created?: number }).created ?? Date.now()
         await this.finish(state, "⏹ interrupted", "interrupt")
         return
       }
       case "session.execution.failed": {
+        state.endedAt = (ev as { created?: number }).created ?? Date.now()
         const msg = errText(data.error)
         tlog(`execution failed: ${msg}`)
         await this.finish(state, `❌ ${msg}`, "fail")
@@ -660,11 +666,12 @@ export class Renderer {
     }
 
     // turn-end status: outcome marker + stats (always exactly one message)
+    const elapsedMs = (state.endedAt ?? Date.now()) - (state.startedAt ?? Date.now())
     const stats = this.opts.stats
-      ? await this.opts.getStats?.(state.sessionID).catch(() => undefined)
+      ? await this.opts.getStats?.(state.sessionID, state.startedAt).catch(() => undefined)
       : undefined
     const head = marker ?? "✅"
-    const statsPart = stats ? this.statsLine(stats) : ""
+    const statsPart = stats ? this.statsLine(stats, elapsedMs) : ""
     await this.send(state, statsPart ? `${head} · ${statsPart}` : head, {
       html: this.htmlOn(),
       silent: true,
@@ -679,10 +686,15 @@ export class Renderer {
     }
   }
 
-  private statsLine(s: StatsInfo): string {
+  private statsLine(s: StatsInfo, elapsedMs: number): string {
     const parts: string[] = []
     if (s.model) parts.push(this.htmlOn() ? `<code>${esc(s.model)}</code>` : s.model)
     if (s.agent) parts.push(s.agent)
+    if (typeof s.turnOutput === "number" && s.turnOutput > 0 && elapsedMs > 0) {
+      const tps = Math.round(s.turnOutput / Math.max(elapsedMs / 1000, 0.1))
+      parts.push(`${tps} tok/s`)
+    }
+    if (elapsedMs > 0) parts.push(fmtTurn(elapsedMs))
     if (typeof s.cost === "number" && s.cost > 0) {
       parts.push(s.cost >= 1 ? `$${s.cost.toFixed(2)}` : `$${s.cost.toFixed(4)}`)
     }
@@ -767,6 +779,9 @@ interface TextBlock {
 interface TurnState {
   sessionID: string
   chatId: string
+  /** execution start/end stamps for turn timing + tok/s */
+  startedAt?: number
+  endedAt?: number
   placeholderID?: number
   /** drafts mode: animated preview id (same id per turn) */
   draftID?: number
@@ -793,6 +808,12 @@ const errText = (err: unknown): string => {
 const fmtDur = (ms: number): string => `${(ms / 1000).toFixed(1)}s`
 
 const fmtK = (n: number): string => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n))
+
+const fmtTurn = (ms: number): string => {
+  const s = ms / 1000
+  if (s < 60) return `${s.toFixed(1)}s`
+  return `${Math.floor(s / 60)}m${Math.round(s % 60)}s`
+}
 
 const blockKey = (data: Record<string, unknown>): string =>
   `${String(data.assistantMessageID ?? "?")}:${String(data.ordinal ?? 0)}`

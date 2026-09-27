@@ -113,7 +113,10 @@ export default Plugin.define({
             tlog(`model limit load failed: ${String(err)}`)
           }
         }
-        const getStats = async (sessionID: string): Promise<StatsInfo | undefined> => {
+        const getStats = async (
+          sessionID: string,
+          startedAt?: number,
+        ): Promise<StatsInfo | undefined> => {
           try {
             if (!limitsLoaded) await loadLimits()
             const info = await ctx.session.get({ sessionID })
@@ -121,23 +124,37 @@ export default Plugin.define({
               ? `${info.model.providerID}/${info.model.id}${info.model.variant ? `#${info.model.variant}` : ""}`
               : undefined
             let contextUsed: number | undefined
+            let agent: string | undefined
+            let turnOutput: number | undefined
             try {
               const msgs = await ctx.session.context({ sessionID })
               const last = [...msgs].reverse().find((m) => m.type === "assistant")
-              if (last && last.type === "assistant" && last.tokens) {
-                contextUsed = (last.tokens.input ?? 0) + (last.tokens.cache?.read ?? 0)
+              if (last && last.type === "assistant") {
+                if (last.tokens) {
+                  contextUsed = (last.tokens.input ?? 0) + (last.tokens.cache?.read ?? 0)
+                }
+                agent = last.agent || undefined
+              }
+              if (startedAt) {
+                turnOutput = 0
+                for (const m of msgs) {
+                  if (m.type !== "assistant") continue
+                  const created = (m as { time?: { created?: number } }).time?.created ?? 0
+                  if (created >= startedAt) turnOutput += m.tokens?.output ?? 0
+                }
               }
             } catch {
-              /* context unavailable */
+              /* session context unavailable */
             }
             return {
               model: modelKey,
-              agent: info.agent ?? undefined,
+              agent: agent ?? info.agent ?? undefined,
               cost: typeof info.cost === "number" ? info.cost : undefined,
               contextUsed,
               contextLimit: info.model
                 ? modelLimits.get(`${info.model.providerID}/${info.model.id}`)
                 : undefined,
+              turnOutput,
             }
           } catch (err) {
             tlog(`stats failed: ${String(err)}`)
