@@ -4,6 +4,18 @@
   "description": "Drive OpenCode from Telegram — a v2 plugin that bridges a bot DM to OpenCode sessions.",
   "type": "module",
   "license": "MIT",
+  "author": "obxto9",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/obxto9/opencode-telegram.git"
+  },
+  "homepage": "https://github.com/obxto9/opencode-telegram#readme",
+  "bugs": {
+    "url": "https://github.com/obxto9/opencode-telegram/issues"
+  },
+  "engines": {
+    "node": ">=22.18.0"
+  },
   "keywords": [
     "opencode",
     "opencode-plugin",
