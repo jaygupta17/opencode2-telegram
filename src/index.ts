@@ -99,9 +99,7 @@ export default Plugin.define({
         )
 
         // local API override + command registry + menu sync
-        configureLocalApi(
-          ctx.options.localApi as { port?: number; password?: string } | undefined,
-        )
+        configureLocalApi(ctx.options.localApi as { port?: number; password?: string } | undefined)
         const cmdOpts = (ctx.options.commands ?? {}) as {
           builtins?: boolean
           custom?: boolean
