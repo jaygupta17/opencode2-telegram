@@ -23,6 +23,7 @@
 - **Native streaming, not message spam** — output streams as an animated Telegram draft ("Thinking…" + real Stop button), then lands as final messages. Telegram built drafts for AI bots; this uses them.
 - **Strict block order** — every block (thinking · tool call · tool result · answer) is its own message, frozen once complete. No merged walls of text, no scrambled ordering. Thinking renders as muted expandable quotes.
 - **Approvals from the couch** — permission requests arrive as cards with **Allow once / Allow always / Reject**. You approve the agent's shell commands from your phone.
+- **Questions answered in chat** — when the agent's `question` tool (or any MCP form) asks something, it renders as a Telegram card: option buttons, multi-select, ✍️ free-text answers, Submit/Cancel. The agent unblocks the moment you tap; pending questions survive plugin reloads.
 - **The whole command surface** — `/model` `/thinking` `/agent` pickers, `/undo` (revert last turn's file changes, with confirm), `/compact`, `/init`, `/sessions`, plus **your own command files become Telegram commands automatically**.
 - **Zero ports, zero extra RAM** — runs in-process inside OpenCode, DM-only with a chat-ID allowlist, outbound long-polling only.
 
@@ -41,7 +42,10 @@ Bootstrap mode: with an empty `allowFrom`, the bot replies to your first DM with
 
 - **Native streaming drafts** — text streams as an animated Telegram draft ("Thinking…" placeholder) with the built-in stop control; blocks land as real messages when complete
 - **Strict block model** — one block = one message: thinking (expandable blockquote) · tool call · tool result (real output in an expandable quote) · text. A message is edited only while its own block streams, then frozen forever
+- **One-line tool summaries** — tool calls render as `Edit <file> (a→b chars)`, `Grep "pattern"`, `Shell <cmd>` — never raw JSON dumps
+- **Render scope = your current session** — only the session your chat points at streams into Telegram; sessions are never permanently glued (TUI work can't leak into your DM)
 - **Approvals on your phone** — `🔐 permission needed` cards with **Allow once / Allow always / Reject** (`permission.reply`)
+- **Question cards** — the `question` tool and MCP forms render as Telegram cards: option buttons, multi-select, ✍️ free-text input, Submit/Cancel; answers post straight back to the waiting tool call. Pending forms re-surface after a restart
 - **Full command surface** — core commands (`/new /status /stop /model /thinking /agent /history /sendfile`) plus OpenCode built-ins (`/init /compact /undo /sessions`) and **your own command files auto-exposed** (`~/.config/opencode/commands/*.md` → `/yourcommand`), live-refreshed
 - **Button pickers** — model (paginated), agent, thinking variant
 - **Turn-end status line** — `✅ model#variant · agent · 42 tok/s · 12.4s · $0.0031 · ctx 23.4k/128k (18%)`
@@ -54,6 +58,7 @@ Bootstrap mode: with an empty `allowFrom`, the bot replies to your first DM with
 
 - OpenCode v2 (`@opencode/plugin` 2.0.x — tested against 2.0.16)
 - A Telegram bot token from [@BotFather](https://t.me/BotFather)
+- **Platforms: macOS and Linux**, wherever OpenCode v2 runs — the plugin uses only pid files, signals, and HTTP; no platform-specific dependencies
 
 ## Install
 
@@ -105,7 +110,7 @@ All options live under the plugin `options` object:
 | `stopButton` | `true` | Stop control (inline button in edits mode, native in drafts) |
 | `autoImages` | `true` | Auto-send local images referenced in answers |
 | `toolOutputChars` | `3000` | Max tool output shown in the expandable quote |
-| `maxActivityMessages` | `60` | Per-turn cap on activity messages |
+| `maxActivityMessages` | `60` | Per-turn cap on activity messages (raise it, e.g. `400`, if you want full visibility on very long tool-heavy turns) |
 | `throttleMs` | `1500` | Min ms between streamed edits of one message |
 | `pollTimeoutSec` | `30` | Telegram long-poll timeout |
 | `commands` | all on | `{ "builtins": true, "custom": true, "hidden": [] }` |
@@ -128,9 +133,9 @@ All options live under the plugin `options` object:
 ## Architecture (short)
 
 - Runs inside the OpenCode server process as a v2 plugin (zero extra RAM, no ports)
-- **Single-instance lease** (`~/.cache/opencode-telegram/loop.lease`, pid + heartbeat) so exactly one opencode process polls Telegram
+- **Single-instance lease** (`~/.cache/opencode-telegram/loop.lease`, pid + heartbeat) so exactly one opencode process polls Telegram; offsets persist across plugin hot-reloads, the loop yields if another process takes over
 - **Send queue** per chat (250ms gap, 429/socket retry) to stay inside Telegram limits
-- Endpoints outside the plugin domain (`session.compact`, `revert.*`, session list) are reached through a local HTTP self-call with candidate discovery (`local-api.ts`)
+- Endpoints outside the plugin domain (`session.compact`, `revert.*`, session list, `form.*`) are reached through a local HTTP self-call with candidate discovery (`local-api.ts`)
 
 ## Development
 
