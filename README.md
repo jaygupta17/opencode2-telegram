@@ -29,7 +29,7 @@ An in-process OpenCode v2 plugin (`Plugin.define` + setup context): long-polls y
 2. **Add the plugin** (via GitHub, no npm needed):
 
    ```
-   opencode plugin add github:<you>/opencode-telegram
+   opencode plugin add github:jaygupta17/opencode2-telegram
    ```
 
    or clone and point at the local directory in config.
@@ -40,7 +40,7 @@ An in-process OpenCode v2 plugin (`Plugin.define` + setup context): long-polls y
    {
      "plugins": [
        {
-         "package": "github:<you>/opencode-telegram", // or an absolute path
+         "package": "github:jaygupta17/opencode2-telegram", // or an absolute path
          "options": {
            "token": "<BotFather token>",   // or set TELEGRAM_BOT_TOKEN
            "allowFrom": []                  // empty = bootstrap: the bot replies with your chat_id
