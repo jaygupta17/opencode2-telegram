@@ -6,7 +6,7 @@ import { acquireLease, runPollLoop, type Lease } from "./loop.js"
 import { TelegramBot, type TelegramConfig, type TelegramMessage } from "./bot.js"
 import { Sessions } from "./sessions.js"
 import { Renderer } from "./render.js"
-import { dispatch, type UndoStashEntry } from "./commands.js"
+import { dispatch, renderModelPicker, type UndoStashEntry } from "./commands.js"
 import { buildRegistry, syncMenu } from "./builtins.js"
 import { apiCall, configureLocalApi } from "./local-api.js"
 
@@ -195,6 +195,82 @@ export default Plugin.define({
           cardText?: string
         }): Promise<void> => {
           try {
+            if (cb.data.startsWith("agt:")) {
+              const agent = cb.data.slice(4)
+              try {
+                const sid = await sessions.current(cb.chatId)
+                if (!sid) {
+                  await bot?.answerCallbackQuery(cb.callbackID, "no active session")
+                  return
+                }
+                await ctx.session.switchAgent({ sessionID: sid, agent })
+                await bot?.answerCallbackQuery(cb.callbackID, `agent → ${agent}`)
+                if (cb.messageID !== undefined) {
+                  await bot
+                    ?.editMessageText(cb.chatId, cb.messageID, `🤖 agent → ${agent}`, {
+                      removeKeyboard: true,
+                    })
+                    .catch(() => {})
+                }
+              } catch (err) {
+                tlog(`agent switch failed: ${String(err)}`)
+                await bot?.answerCallbackQuery(cb.callbackID, "switch failed")
+              }
+              return
+            }
+            if (cb.data.startsWith("mdlp:")) {
+              const arg = cb.data.slice(5)
+              if (arg === "noop") {
+                await bot?.answerCallbackQuery(cb.callbackID)
+                return
+              }
+              const page = Number(arg) || 0
+              const sid = await sessions.current(cb.chatId)
+              const info = sid
+                ? await ctx.session.get({ sessionID: sid }).catch(() => undefined)
+                : undefined
+              const current = info?.model ? `${info.model.providerID}/${info.model.id}` : ""
+              await renderModelPicker(
+                ctx,
+                bot as TelegramBot,
+                cb.chatId,
+                page,
+                cb.messageID,
+                current,
+              ).catch((err) => tlog(`model picker: ${String(err)}`))
+              await bot?.answerCallbackQuery(cb.callbackID)
+              return
+            }
+            if (cb.data.startsWith("mdl:")) {
+              const key = cb.data.slice(4)
+              const sep = key.indexOf("|")
+              if (sep < 0) {
+                await bot?.answerCallbackQuery(cb.callbackID, "bad model")
+                return
+              }
+              const providerID = key.slice(0, sep)
+              const id = key.slice(sep + 1)
+              try {
+                const sid = await sessions.current(cb.chatId)
+                if (!sid) {
+                  await bot?.answerCallbackQuery(cb.callbackID, "no active session")
+                  return
+                }
+                await ctx.session.switchModel({ sessionID: sid, model: { providerID, id } })
+                await bot?.answerCallbackQuery(cb.callbackID, `model → ${id}`)
+                if (cb.messageID !== undefined) {
+                  await bot
+                    ?.editMessageText(cb.chatId, cb.messageID, `🧠 model → ${providerID}/${id}`, {
+                      removeKeyboard: true,
+                    })
+                    .catch(() => {})
+                }
+              } catch (err) {
+                tlog(`model switch failed: ${String(err)}`)
+                await bot?.answerCallbackQuery(cb.callbackID, "switch failed")
+              }
+              return
+            }
             if (cb.data === "undo:confirm" || cb.data === "undo:cancel") {
               const stash = undoStash.get(String(cb.chatId))
               if (!stash) {

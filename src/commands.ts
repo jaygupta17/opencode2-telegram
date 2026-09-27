@@ -12,6 +12,41 @@ export interface UndoStashEntry {
   sessionID: string
 }
 
+/** Paginated model picker (buttons). messageID = edit in place, else send new. */
+export async function renderModelPicker(
+  ctx: Context,
+  bot: TelegramBot,
+  chatId: number,
+  page: number,
+  messageID?: number,
+  current?: string,
+): Promise<void> {
+  const res = await ctx.model.list()
+  const models = res.data
+    .filter((m) => m.status !== "deprecated")
+    .map((m) => ({ label: `${m.providerID}/${m.id}`, key: `${m.providerID}|${m.id}` }))
+    .filter((m) => m.key.length <= 56)
+  const perPage = 8
+  const pages = Math.max(1, Math.ceil(models.length / perPage))
+  const p = Math.min(Math.max(0, Math.floor(page)), pages - 1)
+  const slice = models.slice(p * perPage, (p + 1) * perPage)
+  const rows: Array<Array<{ text: string; callback_data: string }>> = slice.map((m) => [
+    { text: m.label.slice(0, 60), callback_data: `mdl:${m.key}` },
+  ])
+  rows.push([
+    { text: "◀", callback_data: `mdlp:${(p - 1 + pages) % pages}` },
+    { text: `${p + 1}/${pages}`, callback_data: "mdlp:noop" },
+    { text: "▶", callback_data: `mdlp:${(p + 1) % pages}` },
+  ])
+  const text = `🧠 model${current ? ` (current: ${current})` : ""} — pick one:`
+  const keyboard = { inline_keyboard: rows }
+  if (messageID !== undefined) {
+    await bot.editMessageText(chatId, messageID, text, { keyboard })
+  } else {
+    await bot.sendMessage(chatId, text, { keyboard })
+  }
+}
+
 export async function dispatch(input: {
   ctx: Context
   bot: TelegramBot
@@ -173,10 +208,20 @@ export async function dispatch(input: {
         const arg = rest[0]
         if (!arg) {
           const list = await ctx.agent.list()
-          const rows = list.data
-            .filter((a) => !a.hidden)
-            .map((a) => `${a.id} — ${a.description ?? a.name}${a.mode === "primary" ? " ·" : ""}`)
-          await reply(`agents (· = primary):\n${rows.join("\n")}`)
+          const agents = list.data.filter((a) => !a.hidden).slice(0, 20)
+          if (agents.length === 0) {
+            await reply("no agents available")
+            return
+          }
+          const keyboard = {
+            inline_keyboard: agents.map((a) => [
+              {
+                text: `${a.id}${a.mode === "primary" ? " ★" : ""} — ${(a.description ?? a.name ?? "").slice(0, 40)}`,
+                callback_data: `agt:${a.id}`,
+              },
+            ]),
+          }
+          await bot.sendMessage(chatId, "🤖 pick an agent:", { keyboard })
           return
         }
         await ctx.session.switchAgent({ sessionID: sid, agent: arg })
@@ -189,8 +234,8 @@ export async function dispatch(input: {
         const arg = rest[0]
         const info = await ctx.session.get({ sessionID: sid })
         if (!arg) {
-          const cur = info.model ? `${info.model.providerID}/${info.model.id}` : "(default)"
-          await reply(`model: ${cur}\nswitch: /model <provider>/<id>`)
+          const cur = info.model ? `${info.model.providerID}/${info.model.id}` : ""
+          await renderModelPicker(ctx, bot, chatId, 0, undefined, cur)
           return
         }
         const slash = arg.indexOf("/")

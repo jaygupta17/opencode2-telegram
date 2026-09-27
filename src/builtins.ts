@@ -85,6 +85,8 @@ const CORE_MENU: Array<{ command: string; description: string }> = [
   { command: "new", description: "Start a fresh session" },
   { command: "status", description: "Current session info" },
   { command: "stop", description: "Interrupt the running turn" },
+  { command: "model", description: "Show or switch the model" },
+  { command: "agent", description: "List or switch agents" },
   { command: "history", description: "Show recent messages" },
   { command: "sendfile", description: "Send a local file" },
   { command: "help", description: "Show all commands" },
@@ -110,7 +112,10 @@ export async function syncMenu(bot: TelegramBot, registry: Registry): Promise<vo
 
 export function helpText(registry: Registry): string {
   const builtins = BUILTINS.filter((b) => registry.byTg.get(b.tg) === b)
-  const lines: string[] = ["🐝 bot", "/new /status /stop /history /sendfile /help"]
+  const lines: string[] = [
+    "🐝 bot",
+    "/new /status /stop /model /agent /history /sendfile /help",
+  ]
   if (builtins.length > 0) {
     lines.push("", "⚙️ opencode")
     for (const b of builtins) {

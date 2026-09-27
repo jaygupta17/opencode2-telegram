@@ -51,7 +51,6 @@ export interface EditOpts extends SendOpts {
   /** explicitly clear any inline keyboard */
   removeKeyboard?: boolean
 }
-
 interface ApiEnvelope<T> {
   ok: boolean
   result?: T
@@ -155,7 +154,11 @@ export class TelegramBot {
       text: chunk,
       ...(opts.html ? { parse_mode: "HTML" } : {}),
       link_preview_options: NO_PREVIEW,
-      ...(opts.removeKeyboard ? { reply_markup: NO_BUTTON } : {}),
+      ...(opts.keyboard
+        ? { reply_markup: opts.keyboard }
+        : opts.removeKeyboard
+          ? { reply_markup: NO_BUTTON }
+          : {}),
     }
     try {
       return await this.call("editMessageText", body)
