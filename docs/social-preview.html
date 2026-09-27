@@ -1,0 +1,95 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 1280px; height: 640px; overflow: hidden; }
+  body {
+    font-family: system-ui, "Ubuntu", "DejaVu Sans", sans-serif;
+    background: #0a0e14; color: #e8eef6;
+  }
+  #card {
+    position: relative; width: 1280px; height: 640px; overflow: hidden;
+    background:
+      radial-gradient(700px 420px at 12% 8%, rgba(38, 165, 228, 0.22), transparent 60%),
+      radial-gradient(760px 500px at 95% 100%, rgba(138, 43, 226, 0.20), transparent 60%),
+      linear-gradient(160deg, #0a0e14 0%, #0d1420 100%);
+  }
+  .grid {
+    position: absolute; inset: 0;
+    background-image: radial-gradient(rgba(255, 255, 255, 0.05) 1px, transparent 1px);
+    background-size: 26px 26px;
+  }
+  .left { position: absolute; left: 72px; top: 148px; width: 590px; }
+  .pill {
+    display: inline-block; font-size: 15px; letter-spacing: 0.14em; font-weight: 600;
+    color: #7dd3fc; border: 1px solid rgba(125, 211, 252, 0.35); padding: 7px 14px;
+    border-radius: 999px; background: rgba(38, 165, 228, 0.08);
+  }
+  h1 { font-size: 58px; font-weight: 800; letter-spacing: -0.02em; margin-top: 22px; }
+  h1 .accent { color: #38bdf8; }
+  .sub { font-size: 25px; color: #9fb0c3; margin-top: 14px; line-height: 1.35; }
+  .chips { margin-top: 26px; display: flex; gap: 10px; flex-wrap: wrap; }
+  .chip {
+    font-size: 15.5px; color: #cfe3f5; background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.09); padding: 8px 14px; border-radius: 10px;
+  }
+  .foot { position: absolute; left: 72px; bottom: 54px; font-size: 17px; color: #7c8ea3; }
+  .mono { font-family: "DejaVu Sans Mono", monospace; }
+  .foot .mono { color: #a9c1d8; }
+  .phone {
+    position: absolute; right: 64px; top: 94px; width: 470px; height: 452px;
+    background: #0f1621; border: 1px solid rgba(255, 255, 255, 0.10); border-radius: 28px;
+    box-shadow: 0 30px 80px rgba(0, 0, 0, 0.55), inset 0 1px 0 rgba(255, 255, 255, 0.04);
+    padding: 24px 22px; display: flex; flex-direction: column; gap: 11px;
+  }
+  .msg { font-size: 16.5px; line-height: 1.35; padding: 9px 13px; border-radius: 14px; max-width: 100%; }
+  .you { align-self: flex-end; background: #2b5278; color: #eaf3ff; border-bottom-right-radius: 5px; }
+  .block { align-self: flex-start; background: #182233; color: #d7e4f2; border-bottom-left-radius: 5px; }
+  .msg.mono { font-size: 14.5px; }
+  .ok { color: #8ef0a6; }
+  .perm { background: #2a2416; color: #ffd88a; border: 1px solid rgba(255, 200, 90, 0.25); }
+  .status {
+    align-self: flex-start; background: #101a29; color: #9fb0c3; font-size: 14px;
+    border: 1px solid rgba(255, 255, 255, 0.06);
+  }
+  .btns { align-self: flex-start; display: flex; gap: 8px; padding: 0 0 0 2px; }
+  .btn {
+    font-size: 14.5px; padding: 7px 13px; border-radius: 10px; font-weight: 600;
+  }
+  .btn.ok { background: rgba(46, 160, 67, 0.25); color: #b8f5c4; border: 1px solid rgba(120, 240, 160, 0.35); }
+  .btn.no { background: rgba(160, 46, 46, 0.22); color: #ffc9c9; border: 1px solid rgba(255, 140, 140, 0.3); }
+</style>
+</head>
+<body>
+  <div id="card">
+    <div class="grid"></div>
+    <div class="left">
+      <span class="pill">OPENCODE V2 PLUGIN</span>
+      <h1>opencode<span class="accent">-telegram</span></h1>
+      <div class="sub">Control your coding agent from Telegram — streamed like a native AI bot.</div>
+      <div class="chips">
+        <span class="chip">native drafts + stop</span>
+        <span class="chip">permission buttons</span>
+        <span class="chip">zero ports</span>
+        <span class="chip">/undo · custom commands</span>
+      </div>
+    </div>
+    <div class="foot">github.com/<span class="mono">jaygupta17/opencode2-telegram</span> · MIT</div>
+    <div class="phone">
+      <div class="msg you">what's in the current folder?</div>
+      <div class="msg block">🧠 thinking…</div>
+      <div class="msg block mono">🔧 shell: ls -la</div>
+      <div class="msg perm">🔐 shell permission needed</div>
+      <div class="btns">
+        <span class="btn ok">✅ Allow once</span>
+        <span class="btn no">🚫 Reject</span>
+      </div>
+      <div class="msg block mono ok">✓ shell · 0.3s · total 24 drwxr-xr-x</div>
+      <div class="msg block">You're in your home directory — here's the tree…</div>
+      <div class="msg status mono">✅ mimo-v2.6-flash · build · 38 tok/s · 6.2s</div>
+    </div>
+  </div>
+</body>
+</html>

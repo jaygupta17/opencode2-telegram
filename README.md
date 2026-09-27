@@ -7,6 +7,8 @@
 [![opencode](https://img.shields.io/badge/opencode-v2%20%C2%B7%20plugin-8A2BE2)](https://opencode.ai)
 [![telegram](https://img.shields.io/badge/telegram-DM--only-26A5E4)](https://telegram.org)
 
+![opencode-telegram — control your coding agent from Telegram](docs/social-preview.png)
+
 ```
 [you]  what's in the current folder?
 🧠      …thinking streams as a live draft, with a Stop button…
