@@ -1,8 +1,41 @@
 # opencode-telegram
 
-Drive a local [OpenCode](https://opencode.ai) v2 agent from a Telegram DM — from your phone, anywhere.
+**Your coding agent, in your pocket.** An [OpenCode](https://opencode.ai) v2 plugin that turns a Telegram DM into a full remote control for the agent running on your machine — streamed like Telegram's native AI bots, with approvals, commands, and zero open ports.
 
-An in-process OpenCode v2 plugin (`Plugin.define` + setup context): long-polls your bot, routes messages into real OpenCode sessions, streams the agent's work back as strictly ordered Telegram messages, and surfaces approvals as inline buttons.
+[![ci](https://github.com/jaygupta17/opencode2-telegram/actions/workflows/ci.yml/badge.svg)](https://github.com/jaygupta17/opencode2-telegram/actions/workflows/ci.yml)
+[![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![opencode](https://img.shields.io/badge/opencode-v2%20%C2%B7%20plugin-8A2BE2)](https://opencode.ai)
+[![telegram](https://img.shields.io/badge/telegram-DM--only-26A5E4)](https://telegram.org)
+
+```
+[you]  what's in the current folder?
+🧠      …thinking streams as a live draft, with a Stop button…
+🔧      shell: ls -la
+✓       shell · 0.3s · total 24 drwxr-xr-x …
+💬      You're in your home directory — here's the tree…
+✅      mimo-v2.6-flash · build · 38 tok/s · 6.2s · ctx 21.4k/128k (17%)
+```
+
+## Why this one
+
+- **Native streaming, not message spam** — output streams as an animated Telegram draft ("Thinking…" + real Stop button), then lands as final messages. Telegram built drafts for AI bots; this uses them.
+- **Strict block order** — every block (thinking · tool call · tool result · answer) is its own message, frozen once complete. No merged walls of text, no scrambled ordering. Thinking renders as muted expandable quotes.
+- **Approvals from the couch** — permission requests arrive as cards with **Allow once / Allow always / Reject**. You approve the agent's shell commands from your phone.
+- **The whole command surface** — `/model` `/thinking` `/agent` pickers, `/undo` (revert last turn's file changes, with confirm), `/compact`, `/init`, `/sessions`, plus **your own command files become Telegram commands automatically**.
+- **Zero ports, zero extra RAM** — runs in-process inside OpenCode, DM-only with a chat-ID allowlist, outbound long-polling only.
+
+> 📹 **Demo:** _recording coming with the launch post — phone screen: prompt → streaming draft → tool blocks → permission card → status line._
+
+## Install (60 seconds)
+
+```sh
+# 1. create a bot with @BotFather, copy the token, message the bot once
+# 2. add the plugin
+opencode plugin add github:jaygupta17/opencode2-telegram
+# 3. point it at your bot in ~/.config/opencode/opencode.json → plugins[].options
+```
+
+Bootstrap mode: with an empty `allowFrom`, the bot replies to your first DM with your chat ID — paste it in and you're locked to it. Full config table below.
 
 ## Features
 
