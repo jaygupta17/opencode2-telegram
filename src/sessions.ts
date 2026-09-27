@@ -43,11 +43,6 @@ export class Sessions {
     tlog(`chat ${id} registered (${list.length} total)`)
   }
 
-  /** All chats this bot ever served (for proactive scheduler sends). */
-  async allChats(): Promise<string[]> {
-    return [...(await this.chatList())]
-  }
-
   /** The chat whose CURRENT session is `sessionID` — or undefined. */
   async chatFor(sessionID: string): Promise<string | undefined> {
     for (const id of await this.chatList()) {
