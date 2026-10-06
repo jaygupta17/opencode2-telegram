@@ -105,10 +105,12 @@ export default Plugin.define({
         }
         const loadLimits = async (): Promise<void> => {
           try {
-            const list = await ctx.model.list()
-            for (const m of list.data) {
-              const limit = m.limit?.context
-              if (limit) modelLimits.set(`${m.providerID}/${m.id}`, limit)
+            const list = await ctx.model?.list?.()
+            if (list?.data) {
+              for (const m of list.data) {
+                const limit = m.limit?.context
+                if (limit) modelLimits.set(`${m.providerID}/${m.id}`, limit)
+              }
             }
             limitsLoaded = true
           } catch (err) {

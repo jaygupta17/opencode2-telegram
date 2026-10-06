@@ -24,8 +24,8 @@ export async function renderThinkingPicker(
   let variants: string[] = []
   if (model) {
     try {
-      const list = await ctx.model.list()
-      const found = list.data.find(
+      const list = await ctx.model?.list?.()
+      const found = list?.data?.find(
         (m) => m.providerID === model.providerID && m.id === model.id,
       )
       variants = (found?.variants ?? []).map((v) => v.id).slice(0, 12)
@@ -57,8 +57,8 @@ export async function renderModelPicker(
   messageID?: number,
   current?: string,
 ): Promise<void> {
-  const res = await ctx.model.list()
-  const models = res.data
+  const res = await ctx.model?.list?.()
+  const models = (res?.data ?? [])
     .filter((m) => m.status !== "deprecated")
     .map((m) => ({ label: `${m.providerID}/${m.id}`, key: `${m.providerID}|${m.id}` }))
     .filter((m) => m.key.length <= 56)

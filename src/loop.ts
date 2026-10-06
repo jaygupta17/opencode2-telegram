@@ -1,4 +1,4 @@
-import { closeSync, mkdirSync, openSync, readFileSync, unlinkSync, writeSync, existsSync } from "node:fs"
+import { closeSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync, writeSync, existsSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
 import { TelegramBot, type TelegramConfig, type TelegramMessage, type TelegramUpdate } from "./bot.js"
@@ -41,7 +41,7 @@ const readLease = (): LeaseData | undefined => {
 }
 
 const writeLease = (data: LeaseData): void => {
-  writeSync(openSync(LEASE_FILE, "w"), JSON.stringify(data))
+  writeFileSync(LEASE_FILE, JSON.stringify(data))
 }
 
 export interface Lease {
@@ -62,8 +62,11 @@ export function acquireLease(initialOffset = 0): Lease {
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
       const fd = openSync(LEASE_FILE, "wx")
-      writeSync(fd, JSON.stringify({ pid: me, at: Date.now(), offset } satisfies LeaseData))
-      closeSync(fd)
+      try {
+        writeSync(fd, JSON.stringify({ pid: me, at: Date.now(), offset } satisfies LeaseData))
+      } finally {
+        closeSync(fd)
+      }
       return makeHeld()
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err
